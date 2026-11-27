@@ -106,11 +106,11 @@ func collectedWithArgs(toolName, args string) *zeroruntime.CollectedStream {
 }
 
 func TestMalformedDispositionDoesNotInvalidateCoreOutput(t *testing.T) {
-	args := `{"files":[{"path":"main.go","change_type":"modify","content":"x"}],"language":"go","intent":"i","confidence":0.9,"memory_disposition":"not-an-array"}`
+	args := `{"files":[{"path":"main.go","change_type":"create","content":"x"}],"language":"go","intent":"i","confidence":0.9,"memory_disposition":"not-an-array"}`
 	collected := collectedWithArgs(codeWriterToolName, args)
 
 	// Core validation (the retry loop's contract) must succeed.
-	if _, err := parseCodeWriterOutput(collected); err != nil {
+	if _, err := parseCodeWriterOutput(collected, t.TempDir()); err != nil {
 		t.Fatalf("malformed bookkeeping invalidated core output: %v", err)
 	}
 	// Claims layer counts the issue instead of retrying.

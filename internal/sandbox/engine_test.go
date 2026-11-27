@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -851,5 +852,157 @@ func TestEvaluateAllowsWritesInsideDefaultTempRoot(t *testing.T) {
 	}
 	if HasRiskCategory(decision.Risk, "out_of_workspace") {
 		t.Fatalf("temp-root write risk=%v, must not be out_of_workspace", decision.Risk)
+	}
+}
+
+func TestStagePolicyKeepsTighteningsAndDropsWidenings(t *testing.T) {
+	cases := []struct {
+		name string
+		base Policy
+	}{
+		{name: "zero base", base: Policy{}},
+		{name: "default policy", base: DefaultPolicy()},
+		{name: "widened user policy", base: Policy{
+			Mode:             ModeEnforce,
+			Network:          NetworkAllow,
+			EnforceWorkspace: false,
+			BlockUnixSockets: true,
+			MonitorDenials:   true,
+			AllowRead:        []string{"/user/allow-read"},
+			DenyRead:         []string{"/user/secrets", "~/.ssh", "~/.netrc"},
+			AllowWrite:       []string{"/user/allow-write"},
+			DenyWrite:        []string{"/user/no-write"},
+			TempRoot:         "/user/temp",
+		}},
+		{name: "disabled user policy", base: Policy{Mode: ModeDisabled, DenyRead: []string{"/user/secrets"}, DenyWrite: []string{"/user/no-write"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := StagePolicy(tc.base, "/stage/temp")
+			if got.Mode != ModeEnforce || got.Network != NetworkDeny || !got.EnforceWorkspace {
+				t.Fatalf("mode=%q network=%q enforceWorkspace=%v, want enforce, deny, true", got.Mode, got.Network, got.EnforceWorkspace)
+			}
+			if len(got.AllowRead) != 0 || len(got.AllowWrite) != 0 || got.MonitorDenials {
+				t.Fatalf("widenings carried over: allowRead=%v allowWrite=%v monitorDenials=%v", got.AllowRead, got.AllowWrite, got.MonitorDenials)
+			}
+			if got.TempRoot != "/stage/temp" {
+				t.Fatalf("TempRoot = %q, want the stage temp root", got.TempRoot)
+			}
+			if got.BlockUnixSockets != tc.base.BlockUnixSockets {
+				t.Fatalf("BlockUnixSockets = %v, want %v", got.BlockUnixSockets, tc.base.BlockUnixSockets)
+			}
+			if strings.Join(got.DenyWrite, ",") != strings.Join(tc.base.DenyWrite, ",") {
+				t.Fatalf("DenyWrite = %v, want the user list %v", got.DenyWrite, tc.base.DenyWrite)
+			}
+			seen := map[string]int{}
+			for _, entry := range got.DenyRead {
+				seen[entry]++
+				if seen[entry] > 1 {
+					t.Fatalf("DenyRead has %q twice: %v", entry, got.DenyRead)
+				}
+			}
+			for _, want := range append(append(append([]string(nil), tc.base.DenyRead...), defaultDenyReadPaths()...), credentialFileDenyPaths()...) {
+				if seen[want] == 0 {
+					t.Errorf("DenyRead misses %q: %v", want, got.DenyRead)
+				}
+			}
+		})
+	}
+}
+
+func TestStageEngineDerivesOnlyTighteningsFromTheUserEngine(t *testing.T) {
+	workspace := t.TempDir()
+	extraRoot := t.TempDir()
+	backend := Backend{Name: BackendMacOSSeatbelt, Platform: "darwin", Available: true, Executable: "/usr/bin/sandbox-exec", CommandWrapping: true, NativeIsolation: true}
+	store, err := NewGrantStore(StoreOptions{FilePath: filepath.Join(t.TempDir(), "grants.json")})
+	if err != nil {
+		t.Fatalf("NewGrantStore: %v", err)
+	}
+	user := NewEngine(EngineOptions{
+		WorkspaceRoot: workspace,
+		Store:         store,
+		Backend:       backend,
+		Policy: Policy{
+			Mode:       ModeEnforce,
+			Network:    NetworkAllow,
+			AllowWrite: []string{extraRoot},
+			DenyRead:   []string{"/user/secrets"},
+			DenyWrite:  []string{"/user/no-write"},
+		},
+	})
+	if _, err := user.Scope().Add(extraRoot); err != nil {
+		t.Fatalf("add dir: %v", err)
+	}
+	enabled := true
+	if _, err := user.GrantRequestPermissions(RequestPermissionProfile{
+		Network:    &NetworkPermissions{Enabled: &enabled},
+		FileSystem: &FileSystemPermissions{Read: []string{extraRoot}, Write: []string{extraRoot}, DenyRead: []string{"/profile/secrets"}},
+	}, PermissionGrantScopeSession); err != nil {
+		t.Fatalf("GrantRequestPermissions: %v", err)
+	}
+	if _, err := user.GrantForSession(GrantInput{ToolName: "bash", Decision: GrantAllow, ScopeKind: ScopeToolWide}); err != nil {
+		t.Fatalf("GrantForSession: %v", err)
+	}
+	user.GrantCommandPrefixForSession("bash", []string{"curl"})
+	userDenyRead := len(user.policy.DenyRead)
+
+	stage := user.StageEngine(workspace, "")
+	if !reflect.DeepEqual(stage.backend, backend) {
+		t.Fatalf("backend = %#v, want the user backend", stage.backend)
+	}
+	if stage.store != nil {
+		t.Fatal("stage engine kept the user grant store")
+	}
+	fresh, err := NewScope(workspace, nil)
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+	if got, want := stage.Scope().ReadRoots(), fresh.ReadRoots(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stage scope read roots = %v, want a fresh workspace scope %v", got, want)
+	}
+	if got, want := stage.Scope().Roots(), fresh.Roots(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stage scope write roots = %v, want a fresh workspace scope %v", got, want)
+	}
+	if match := stage.lookupSessionGrant("bash", ""); match.Matched {
+		t.Fatal("stage engine kept a user session grant")
+	}
+	if _, ok := stage.LookupCommandPrefixForSession("bash", []string{"curl", "x"}); ok {
+		t.Fatal("stage engine kept a user command prefix grant")
+	}
+	policy := stage.effectivePolicy(stage.policy)
+	if policy.Network != NetworkDeny || len(policy.AllowRead) != 0 || len(policy.AllowWrite) != 0 {
+		t.Fatalf("stage effective policy widened: network=%q allowRead=%v allowWrite=%v", policy.Network, policy.AllowRead, policy.AllowWrite)
+	}
+	for _, want := range []string{"/user/secrets", "/profile/secrets", "~/.ssh", "~/.netrc"} {
+		if !containsString(policy.DenyRead, want) {
+			t.Errorf("stage DenyRead misses %q: %v", want, policy.DenyRead)
+		}
+	}
+	if !containsString(policy.DenyWrite, "/user/no-write") {
+		t.Errorf("stage DenyWrite misses the user entry: %v", policy.DenyWrite)
+	}
+	if gap := stage.EnforcementGap(); gap != "" {
+		t.Errorf("stage engine on a native backend has gap %q", gap)
+	}
+	if len(user.policy.DenyRead) != userDenyRead {
+		t.Fatalf("StageEngine changed the user DenyRead: %v", user.policy.DenyRead)
+	}
+
+	unavailable := NewEngine(EngineOptions{WorkspaceRoot: workspace, Policy: DefaultPolicy(), Backend: Backend{Name: BackendUnavailable, Message: "no backend in this test"}})
+	if gap := unavailable.StageEngine(workspace, "").EnforcementGap(); !strings.Contains(gap, "no backend in this test") {
+		t.Errorf("stage engine over an unavailable backend: gap %q, want the backend message", gap)
+	}
+	disabled := NewEngine(EngineOptions{WorkspaceRoot: workspace, Policy: Policy{Mode: ModeDisabled}, Backend: backend})
+	if gap := disabled.StageEngine(workspace, "").EnforcementGap(); gap != "" {
+		t.Errorf("stage engine over a disabled user policy: gap %q, want enforcing", gap)
+	}
+
+	var none *Engine
+	host := none.StageEngine(workspace, "/stage/temp")
+	if !reflect.DeepEqual(host.policy, StagePolicy(Policy{}, "/stage/temp")) {
+		t.Fatalf("nil receiver policy = %#v, want StagePolicy(Policy{}, temp)", host.policy)
+	}
+	if !reflect.DeepEqual(host.backend, SelectBackend(BackendOptions{})) {
+		t.Fatalf("nil receiver backend = %#v, want the host backend", host.backend)
 	}
 }

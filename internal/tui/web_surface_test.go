@@ -773,6 +773,12 @@ func TestPipelineEditOpensTheEditorOnADraft(t *testing.T) {
 	writeLibraryPipeline(t, base, "lint-only")
 	m, opened := newWebTestModel(t, true)
 	m.cwd = t.TempDir()
+	// --help prints the usage as a notice and opens nothing.
+	m.input.SetValue("/pipeline edit --help")
+	updated, _ := m.Update(testKey(tea.KeyEnter))
+	if row := lastSystemRow(t, updated.(model)); row != "usage: /pipeline edit [--new] [name|default]" || len(*opened) != 0 {
+		t.Fatalf("/pipeline edit --help row = %q, opened = %v", row, *opened)
+	}
 	m.input.SetValue("/pipeline edit lint-only")
 	updated, cmd := m.Update(testKey(tea.KeyEnter))
 	if cmd != nil {
@@ -879,6 +885,51 @@ func TestEditorUseNowGoesThroughPipelineUse(t *testing.T) {
 	}, "lint-only")
 	if err != nil || !strings.Contains(text, "lint-only") {
 		t.Fatalf("askUsePipeline = %q, %v", text, err)
+	}
+}
+
+// TestPipelineUseRefreshesTheViewer pins that /pipeline use changes the
+// pipeline an open viewer shows, without a restart of the surface.
+func TestPipelineUseRefreshesTheViewer(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	writeLibraryPipeline(t, base, "lint-only")
+	m, _ := newWebTestModel(t, false)
+	m = m.openWebSurface()
+	client, landing := viewerClient(t, m)
+	if page := viewerGet(t, client, landing, "./"); strings.Contains(page, `data-name="lint"`) {
+		t.Fatal("the viewer shows lint before any use")
+	}
+	m.input.SetValue("/pipeline use lint-only")
+	m.Update(testKey(tea.KeyEnter))
+	if page := viewerGet(t, client, landing, "./"); !strings.Contains(page, `data-name="lint"`) {
+		t.Fatalf("the viewer does not show the used pipeline:\n%s", page)
+	}
+}
+
+// TestWebOpenConfiguresTheEditorWithTheProjectFile pins that a surface opened
+// with /web gives the editor the workspace, so "Edit a copy" from the viewer
+// copies a trusted project file, not the library entry.
+func TestWebOpenConfiguresTheEditorWithTheProjectFile(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m, _ := newWebTestModel(t, false)
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, ".splice"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	project := `{"version": 1, "name": "project-team", "nodes": [{"name": "lint", "type": "command", "command": ["go", "vet", "./..."]}]}`
+	if err := os.WriteFile(filepath.Join(ws, ".splice", "pipeline.json"), []byte(project), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.cwd, m.trusted = ws, true
+	m = m.openWebSurface()
+	id, err := m.surface.editor.OpenDraft("", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, landing := viewerClient(t, m)
+	if page := viewerGet(t, client, landing, "../editor/"); !strings.Contains(page, id) || !strings.Contains(page, "copy of the project file") {
+		t.Fatalf("a draft from the active topology after /web is not a copy of the project file:\n%s", page)
 	}
 }
 
@@ -1019,5 +1070,21 @@ func TestRunSinkRedactsStoredKeyAndOAuthLogin(t *testing.T) {
 		case <-deadline:
 			t.Fatal("no redacted frame arrived")
 		}
+	}
+}
+
+// TestWebOpenMakesNoDraft pins that /web only configures the editor: it
+// writes no draft, so a later /pipeline edit resumes or starts as before.
+func TestWebOpenMakesNoDraft(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	m, _ := newWebTestModel(t, false)
+	m = m.openWebSurface()
+	entries, err := os.ReadDir(filepath.Join(base, "splice", "pipelines", ".drafts"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("/web wrote drafts: %v", entries)
 	}
 }

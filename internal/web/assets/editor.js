@@ -56,7 +56,110 @@
 
 	function editor() {
 		const boot = JSON.parse(document.body.dataset.boot);
-		const NW = 196, NH = 84, PAD = 12, GAP = 44;
+		// The card of the viewer (pipeline_layout.go): the size, the gaps, and the header band.
+		const NW = 240, NH = 104, PAD = 12, GAPX = 110, GAPY = 32;
+		const BAND = "M1 26 V8 Q1 1 8 1 H232 Q239 1 239 8 V26 Z";
+		const PORTY = NH / 2 - 16, ADDY = NH / 2 + 16;
+		// Free routing: the route of an edge that has no server path. It has no
+		// DOM access. A card box is {x, y}, NW by NH. cubic adds points along a
+		// bend to pts; curve is a bend with horizontal ends, its controls c1
+		// and c2 units right of its ends. The server bends are c1 = -c2.
+		const RM = 8, LANE = 14, LANES = 4;
+		function cubic(pts, x1, y1, ax, ay, bx, by, x2, y2) {
+			for (let k = 1; k <= 12; k++) {
+				const t = k / 12, u = 1 - t;
+				pts.push([u * u * u * x1 + 3 * u * u * t * ax + 3 * u * t * t * bx + t * t * t * x2, u * u * u * y1 + 3 * u * u * t * ay + 3 * u * t * t * by + t * t * t * y2]);
+			}
+		}
+		function curve(pts, x1, y1, x2, y2, c1, c2) {
+			cubic(pts, x1, y1, x1 + c1, y1, x2 + c2, y2, x2, y2);
+			return " C" + (x1 + c1) + " " + y1 + " " + (x2 + c2) + " " + y2 + " " + x2 + " " + y2;
+		}
+		// pathPoints samples a path of M, C, and H commands, such as a server path.
+		function pathPoints(d) {
+			const t = d.match(/[MCH]|-?[\d.]+/g).map((v) => (/[MCH]/.test(v) ? v : Number(v))), pts = [];
+			for (let k = 0; k < t.length;) {
+				const p = pts[pts.length - 1];
+				if (t[k] === "M") { pts.push([t[k + 1], t[k + 2]]); k += 3; } else if (t[k] === "H") { pts.push([t[k + 1], p[1]]); k += 2; } else { cubic(pts, p[0], p[1], t[k + 1], t[k + 2], t[k + 3], t[k + 4], t[k + 5], t[k + 6]); k += 7; }
+			}
+			return pts;
+		}
+		// hit reports whether the segment a-b crosses the card r grown by g (Liang-Barsky).
+		function hit(a, b, r, g) {
+			const x0 = r.x - g, y0 = r.y - g, x1 = r.x + NW + g, y1 = r.y + NH + g;
+			if (Math.max(a[0], b[0]) < x0 || Math.min(a[0], b[0]) > x1 || Math.max(a[1], b[1]) < y0 || Math.min(a[1], b[1]) > y1) return false;
+			const dx = b[0] - a[0], dy = b[1] - a[1];
+			let t0 = 0, t1 = 1;
+			// Clip the segment by each side of the box: t0 and t1 bound the part inside.
+			for (let k = 0; k < 4; k++) {
+				const p = k === 0 ? -dx : k === 1 ? dx : k === 2 ? -dy : dy, q = k === 0 ? a[0] - x0 : k === 1 ? x1 - a[0] : k === 2 ? a[1] - y0 : y1 - a[1];
+				if (p === 0) { if (q < 0) return false; continue; }
+				if (p < 0) t0 = Math.max(t0, q / p); else t1 = Math.min(t1, q / p);
+				if (t0 > t1) return false;
+			}
+			return true;
+		}
+		// blockers returns the cards, grown by g, that the path pts crosses. A
+		// card away from the box of the path is not tested.
+		function blockers(pts, rects, g = RM) {
+			let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+			pts.forEach((p) => { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); });
+			return rects.filter((r) => r.x - g <= x1 && r.x + NW + g >= x0 && r.y - g <= y1 && r.y + NH + g >= y0 && pts.some((p, k) => k > 0 && hit(pts[k - 1], p, r, g)));
+		}
+		// routeFree routes an edge from the card from to the card to around the
+		// cards rects. The plain curve is the first try. When it crosses a card,
+		// the edge takes a horizontal lane LANE units above or below the cards in
+		// its way (the band), the nearer one first. A forward lane bends in the
+		// space between the two cards. A U-turn lane turns right of the band
+		// and left of it, and runs above or below the two cards too: a target
+		// left of its source gets only U-turn lanes, and never the plain curve,
+		// which would cross both cards. A lane that crosses more cards adds them
+		// to the band and tries again, LANES times at most for each kind. With
+		// no clear lane, it returns the plain curve with fallback set. The label
+		// (x, y) starts at the middle of the last lane run, or of the plain
+		// curve, and slides along the path to a place off every card.
+		function routeFree(from, to, rects) {
+			const sx = from.x + NW, sy = from.y + NH / 2, tx = to.x, ty = to.y + NH / 2, s = Math.min(55, (tx - sx) / 2), all = rects.concat([from, to]);
+			const done = (r, fallback) => {
+				const pts = r.pts, m = r.mid;
+				let x = pts[m][0], y = pts[m][1];
+				for (let k = 0; k <= pts.length; k++) {
+					const p = pts[m + (k % 2 ? (k + 1) / 2 : -k / 2)];
+					if (p && !all.some((c) => p[0] + 32 > c.x && p[0] - 32 < c.x + NW && p[1] + 10 > c.y && p[1] - 10 < c.y + NH)) { x = p[0]; y = p[1]; break; }
+				}
+				return { d: r.d, x: x, y: y, fallback: fallback, box: pts.reduce((b, p) => [Math.min(b[0], p[0]), Math.min(b[1], p[1]), Math.max(b[2], p[0]), Math.max(b[3], p[1])], [x - 32, y - 10, x + 32, y + 10]) };
+			};
+			const lane = (L, band, fwd) => {
+				const east = Math.max(...band.map((r) => r.x + NW)), west = Math.min(...band.map((r) => r.x));
+				const pts = [[sx, sy]], xa = fwd ? sx + s : east, xb = fwd ? tx - s : west;
+				let d = "M" + sx + " " + sy + (fwd ? curve(pts, sx, sy, xa, L, s / 2, -s / 2) : curve(pts, sx, sy, east, L, east - sx + 40, 40)) + " H" + xb;
+				pts.push([(xa + xb) / 2, L], [xb, L]);
+				d += fwd ? curve(pts, xb, L, tx, ty, s / 2, -s / 2) : curve(pts, west, L, tx, ty, -40, west - tx - 40);
+				return { d: d, pts: pts, mid: 13 };
+			};
+			const pts = [[sx, sy]], c = Math.max(Math.abs(tx - sx) / 2, 40), plain = { d: "M" + sx + " " + sy + curve(pts, sx, sy, tx, ty, c, -c), pts: pts, mid: 6 };
+			const first = tx < sx ? [] : blockers(pts, rects);
+			if (tx >= sx && !first.length) return done(plain, false);
+			for (const fwd of tx - sx >= 40 ? [true, false] : [false]) {
+				let block = first;
+				for (let pass = 0; pass < LANES; pass++) {
+					const band = fwd ? block : block.concat([from, to]);
+					const up = Math.min(...band.map((r) => r.y)) - LANE, down = Math.max(...band.map((r) => r.y + NH)) + LANE, want = (sy + ty) / 2;
+					const more = [];
+					for (const L of Math.abs(up - want) <= Math.abs(down - want) ? [up, down] : [down, up]) {
+						if (L < PAD) continue;
+						const r = lane(L, band, fwd), b = blockers(r.pts, rects);
+						// A lane must not cross its own two cards either.
+						if (!b.length && !blockers(r.pts, [from, to], -2).length) return done(r, false);
+						b.forEach((x) => { if (block.indexOf(x) < 0 && more.indexOf(x) < 0) more.push(x); });
+					}
+					if (!more.length) break;
+					block = block.concat(more);
+				}
+			}
+			return done(plain, true);
+		}
+
 		const TIERS = ["trivial", "light", "standard", "substantial", "architectural"];
 		const types = {};
 		boot.types.forEach((t) => { types[t.name] = t; });
@@ -70,6 +173,13 @@
 		let undo = [], redo = [], lastKey = "", lastAt = 0;
 		let saving = false, dirty = false, saveTimer = 0, pending = Promise.resolve(), lost = "", savedAt = 0;
 		let sayTimer = 0, consent = null, drag = null, raf = 0, rendering = false, zoom = 1, tab = "form";
+		// The live run: the frames by node name, the viewer's graph state, and the stream.
+		let live = Object.create(null), liveHead = null, liveEnded = false, liveNote = "", source = null;
+		const liveFrame = (name) => live[name] || null;
+		// mark is the marker that starts a label, as the viewer does (labelMarker).
+		const mark = (s) => { const r = Array.from(s || ""); return r.length >= 3 && r[0] === "[" && r[2] === "]" ? r.slice(0, 3).join("") : ""; };
+		// words is a label without its marker, as the viewer does (labelWords).
+		const words = (s) => { const m = mark(s); return m ? s.slice(m.length).replace(/^ /, "") : s || ""; };
 
 		const wrap = $("wrap"), svg = $("plane"), nodesG = $("node-g"), edgesG = $("edge-g"), rubber = $("rubber");
 		const panel = $("panel"), topoForm = $("topo-form"), nodeForm = $("node-form"), dialog = $("pub");
@@ -83,7 +193,8 @@
 		function norm() {
 			if (!Array.isArray(doc.nodes)) doc.nodes = [];
 			if (!Array.isArray(doc.edges)) doc.edges = [];
-			for (let i = pos.length; i < doc.nodes.length; i++) pos.push({ x: PAD, y: PAD + i * (NH + GAP) });
+			// A node with no position goes in a row, left to right, as the server fallback does.
+			for (let i = pos.length; i < doc.nodes.length; i++) pos.push({ x: PAD + i * (NW + GAPX), y: PAD });
 			pos.length = doc.nodes.length;
 		}
 		norm();
@@ -108,7 +219,10 @@
 		const snap = () => JSON.stringify({ doc: doc, pos: pos });
 		// commit applies one change. One key in a short burst is one undo step.
 		// A change that changes nothing makes no undo step and no save.
+		// A change of the document, and undo or redo, first ends a drag: the
+		// drag holds a node index and element that the change can make stale.
 		function commit(fn, key) {
+			if (drag) endDrag();
 			const now = Date.now(), before = snap();
 			fn();
 			if (snap() === before) return false;
@@ -124,6 +238,7 @@
 			return true;
 		}
 		function travel(from, to, label) {
+			if (drag) endDrag();
 			if (!from.length) return say("Nothing to " + label + ".");
 			to.push(snap());
 			const v = JSON.parse(from.pop());
@@ -204,9 +319,57 @@
 			const skipped = n.tiers && n.tiers.length ? TIERS.filter((t) => n.tiers.indexOf(t) < 0) : [];
 			return skipped.length ? "skipped at " + skipped.join(", ") : "every tier";
 		}
-		// cut keeps a line inside the box, with the viewer's caps.
-		const cut = (s, n) => { const r = Array.from(s || ""); return r.length > n ? r.slice(0, n - 1).join("") + "…" : s || ""; };
+		// Text columns, as the server counts them (runeColumns): a combining
+		// mark is 0, an East Asian wide rune 2, else 1.
+		const WIDE = [[0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe30, 0xfe4f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f900, 0x1f9ff], [0x20000, 0x3fffd]];
+		const cols = (ch) => { const c = ch.codePointAt(0); return /[\p{Mn}\p{Me}]/u.test(ch) ? 0 : WIDE.some((w) => c >= w[0] && c <= w[1]) ? 2 : 1; };
+		const take = (r, n) => { let k = 0, c = 0; while (k < r.length && c + cols(r[k]) <= n) { c += cols(r[k]); k++; } return k; };
+		// cutEnd and cutMiddle keep a line inside the box, as the server does.
+		// cutMiddle keeps the start and the end of a name, so names that differ
+		// at the end stay apart.
+		const cutEnd = (s, n) => { const r = Array.from(s || ""); return take(r, n) === r.length ? s || "" : r.slice(0, take(r, n - 1)).join("") + "…"; };
+		function cutMiddle(s, n) {
+			const r = Array.from(s || "");
+			if (take(r, n) === r.length) return s || "";
+			const budget = Math.max(n - 1, 0), head = take(r, Math.ceil(budget / 2));
+			let tail = r.length, c = 0;
+			while (tail > head && c + cols(r[tail - 1]) <= Math.floor(budget / 2)) { c += cols(r[tail - 1]); tail--; }
+			// A combining mark whose base was cut goes too.
+			while (tail < r.length && cols(r[tail]) === 0) tail++;
+			return r.slice(0, head).join("") + "…" + r.slice(tail).join("");
+		}
 		const nodeProblems = (i) => check.problems.filter((p) => p.index === i);
+		// pillWord is the edge label of a payload; none only sets the order.
+		const pillWord = (payload) => (payload === "none" ? "order" : payload || "summary");
+		// receives words what the incoming edges carry, as the viewer does (receivesText).
+		function receives(name) {
+			const count = { summary: 0, output: 0, order: 0 };
+			let n = 0;
+			doc.edges.forEach((e) => { if (e.to === name) { n++; count[pillWord(e.payload)] = (count[pillWord(e.payload)] || 0) + 1; } });
+			if (!n) return "receives nothing, runs first";
+			return "receives " + Object.keys(count).filter((k) => count[k]).map((k) => k + (count[k] > 1 ? " x" + count[k] : "")).join(", ");
+		}
+		// walk returns the names that the edges reach from start in one direction.
+		function walk(start, from, to) {
+			const seen = {}, queue = [start];
+			seen[start] = true;
+			while (queue.length) {
+				const name = queue.pop();
+				doc.edges.forEach((e) => { if (e[from] === name && !seen[e[to]]) { seen[e[to]] = true; queue.push(e[to]); } });
+			}
+			return seen;
+		}
+		// traced is the path of the selection: the ancestors and the descendants
+		// of the selected node, or of both ends of the selected edge. It is null
+		// when nothing is selected, and while a connect chooses its target.
+		function traced() {
+			if (!sel || link) return null;
+			const e = sel.k === "edge" && doc.edges[sel.i], n = sel.k === "node" && doc.nodes[sel.i];
+			const sets = [];
+			(e ? [e.from, e.to] : n ? [n.name] : []).forEach((name) => { sets.push(walk(name, "from", "to"), walk(name, "to", "from")); });
+			if (!sets.length) return null;
+			return { node: (name) => sets.some((s) => s[name]), edge: (x) => sets.some((s) => s[x.from] && s[x.to]) };
+		}
 		const card = (i) => nodesG.children[i] || null;
 		const place = (g, p) => g.setAttribute("transform", "translate(" + p.x + " " + p.y + ")");
 
@@ -216,26 +379,26 @@
 			// Keep the focus on a node only while it is still the selection.
 			if (!(link || (sel && sel.k === "node" && sel.i === refocus))) refocus = -1;
 			nodesG.textContent = "";
+			freeCache = {};
+			const path = traced();
 			doc.nodes.forEach((n, i) => {
 				const probs = nodeProblems(i).length;
-				const name = n.name || "(no name)";
-				const g = svgEl("g", { class: "node s-" + (probs ? "failed" : "static") + (sel && sel.k === "node" && sel.i === i ? " selected" : "") + (link && link.target === i ? " target" : ""), tabindex: "0", role: "button", "data-i": i });
-				g.setAttribute("aria-label", name + ", " + subtitle(n) + ", " + label(n, probs));
-				const title = svgEl("title");
-				title.textContent = name + "\n" + subtitle(n) + "\n" + label(n, probs);
-				g.appendChild(title);
+				// A node with problems is "invalid": a dashed outline, not the failed look of a run.
+				const g = svgEl("g", { class: "node" + (probs ? " invalid" : "") + (sel && sel.k === "node" && sel.i === i ? " selected" : "") + (link && link.target === i ? " target" : "") + (path && !path.node(n.name) ? " dim" : ""), tabindex: "0", role: "button", "data-i": i });
+				g.appendChild(svgEl("title"));
 				g.appendChild(svgEl("rect", { class: "ring", x: -5, y: -5, width: NW + 10, height: NH + 10, rx: 12 }));
 				g.appendChild(svgEl("rect", { class: "box", width: NW, height: NH, rx: 8 }));
-				[["n-name", 24, cut(name, 22)], ["n-sub", 41, cut(subtitle(n), 26)], ["n-status", 60, cut(label(n, probs), 26)], ["n-meta", 76, cut(n.model && n.model.model, 26)]].forEach((t) => {
-					const x = svgEl("text", { class: t[0], x: 14, y: t[1] });
-					x.textContent = t[2];
-					g.appendChild(x);
+				g.appendChild(svgEl("path", { class: "band", d: BAND }));
+				[["n-name", 18], ["n-mark", 18], ["n-sub", 44], ["n-status", 61], ["n-recv", 78], ["n-meta", 95]].forEach((t) => {
+					g.appendChild(svgEl("text", t[0] === "n-mark" ? { class: t[0], x: NW - 12, y: t[1], "text-anchor": "end" } : t[0] === "n-name" ? { class: t[0], x: 14, y: t[1], "clip-path": "url(#name-clip)" } : { class: t[0], x: 14, y: t[1] }));
 				});
-						const port = svgEl("g", { class: "handle port" });
-				port.appendChild(svgEl("circle", { cx: NW / 2 - 14, cy: NH, r: 6 }));
+				paintCard(g, n, probs);
+				// The connect port and the "+" sit on the right edge, where edges leave.
+				const port = svgEl("g", { class: "handle port" });
+				port.appendChild(svgEl("circle", { cx: NW, cy: PORTY, r: 6 }));
 				const add = svgEl("g", { class: "handle add" });
-				add.appendChild(svgEl("circle", { cx: NW / 2 + 14, cy: NH, r: 9 }));
-				const plus = svgEl("text", { x: NW / 2 + 14, y: NH + 5 });
+				add.appendChild(svgEl("circle", { cx: NW, cy: ADDY, r: 9 }));
+				const plus = svgEl("text", { x: NW, y: ADDY + 5 });
 				plus.textContent = "+";
 				add.appendChild(plus);
 				g.appendChild(port);
@@ -247,9 +410,11 @@
 			sizePlane();
 			$("empty").hidden = doc.nodes.length > 0;
 			$("title").textContent = doc.name || "(no name)";
+			$("title").title = doc.name || "";
 			document.title = (doc.name || "Draft") + " · Pipeline editor · Splice";
 			renderProblems();
 			renderHead();
+			showLive();
 			if (tab === "json") showJSON();
 			if (refocus >= 0 && card(refocus)) {
 				rendering = true;
@@ -257,52 +422,188 @@
 				rendering = false;
 			}
 		}
+		// paintCard writes the text and the status of a card: the draft facts,
+		// and the live run state of the node with the same name. A problem
+		// keeps its words on the status line; the run state is then in the
+		// marker, the class, and the title.
+		function paintCard(g, n, probs) {
+			// The status line has the words only: the marker is in the header.
+			const f = liveFrame(n.name), name = n.name || "(no name)", recv = receives(n.name), status = probs ? plural(probs, "problem") : f ? words(f.label) : label(n, 0);
+			Array.from(g.classList).forEach((c) => { if (c.indexOf("s-") === 0) g.classList.remove(c); });
+			g.classList.add("s-" + (f ? f.status : "static"));
+			[[".n-name", cutMiddle(name, 21)], [".n-mark", f ? mark(f.label) : probs ? "[!]" : ""], [".n-sub", cutEnd(subtitle(n), 30)], [".n-status", cutEnd(status, 30)], [".n-recv", cutEnd(recv, 30)], [".n-meta", cutEnd(f && f.meta ? f.meta : n.model && n.model.model, 30)]].forEach((t) => {
+				g.querySelector(t[0]).textContent = t[1];
+			});
+			const lines = [name, subtitle(n), label(n, probs)].concat(f ? ["run: " + f.label + (f.meta ? ", " + f.meta : "")] : [], [recv]);
+			g.querySelector("title").textContent = lines.join("\n");
+			g.setAttribute("aria-label", lines.join(", "));
+		}
 		let planeW = 0, planeH = 0;
 		function sizePlane() {
 			let w = 0, h = 0;
 			pos.forEach((p) => { w = Math.max(w, p.x + NW); h = Math.max(h, p.y + NH); });
+			// Routed edges, free lanes, and labels can go below the lowest node.
+			if (routed && routed.nodes === nodeSet()) Object.keys(routed.paths).forEach((k) => { h = Math.max(h, routed.paths[k].bottom || 0); });
+			Object.keys(freeCache).forEach((k) => { h = Math.max(h, freeCache[k].r.box[3]); w = Math.max(w, freeCache[k].r.box[2]); });
+			h = Math.max(h, labelLow);
 			planeW = Math.max(w + 48, (wrap.clientWidth - 2) / zoom);
 			planeH = Math.max(h + 64, (wrap.clientHeight - 2) / zoom);
 			svg.setAttribute("viewBox", "0 0 " + planeW + " " + planeH);
 			svg.setAttribute("width", planeW * zoom);
 			svg.setAttribute("height", planeH * zoom);
 		}
-		function edgePath(a, b) {
-			const x1 = a.x + NW / 2, y1 = a.y + NH, x2 = b.x + NW / 2, y2 = b.y;
-			const bend = Math.max(Math.abs(y2 - y1) / 2, 40);
-			return "M" + x1 + " " + y1 + " C" + x1 + " " + (y1 + bend) + " " + x2 + " " + (y2 - bend) + " " + x2 + " " + y2;
+		// freeCache keeps the free route of each edge by its index. render
+		// clears it; a drag frame drops only the routes that can change (reroute).
+		let freeCache = {}, labelLow = 0;
+		function freeRoute(i, a, b) {
+			const c = freeCache[i];
+			if (c && c.a === a && c.b === b) return c.r;
+			const r = routeFree(pos[a], pos[b], pos.filter((p, k) => k !== a && k !== b));
+			freeCache[i] = { a: a, b: b, r: r };
+			return r;
 		}
-		function drawEdges() {
-			edgesG.textContent = "";
-			doc.edges.forEach((e, i) => {
-				const a = indexOfName(e.from), b = indexOfName(e.to);
-				if (a < 0 || b < 0) return;
-				const d = edgePath(pos[a], pos[b]);
-				edgesG.appendChild(svgEl("path", { d: d, "marker-end": "url(#arrow)", class: "edge " + (e.payload || "summary") + (sel && sel.k === "edge" && sel.i === i ? " sel" : "") + (check.problems.some((p) => p.edge === i) ? " badedge" : "") }));
-				edgesG.appendChild(svgEl("path", { d: d, class: "hit", "data-edge": i }));
-				if (e.payload && e.payload !== "summary") {
-					const t = svgEl("text", { x: (pos[a].x + pos[b].x) / 2 + NW / 2 + 6, y: (pos[a].y + NH + pos[b].y) / 2 });
-					t.textContent = e.payload;
-					edgesG.appendChild(t);
-				}
+		// reroute drops the free routes that a card move from old to now can
+		// change: the edges of the card, and the routes whose box meets the card
+		// at either place. A server path that the card moves into is checked in
+		// route.
+		function reroute(i, old, now) {
+			const name = doc.nodes[i].name, meets = (b, p) => b[0] < p.x + NW + RM && b[2] > p.x - RM && b[1] < p.y + NH + RM && b[3] > p.y - RM;
+			Object.keys(freeCache).forEach((k) => {
+				const e = doc.edges[k];
+				if (!e || e.from === name || e.to === name || meets(freeCache[k].r.box, old) || meets(freeCache[k].r.box, now)) delete freeCache[k];
 			});
 		}
-		function setZoom(z) {
+		// drawEdges draws each edge with its payload pill. An edge takes its
+		// server path while that is valid (route), else its free route
+		// (routeFree). The pills go on top of every edge. A pill selects its
+		// edge, as the edge does.
+		function drawEdges() {
+			edgesG.textContent = "";
+			const path = traced(), pills = [], free = [];
+			labelLow = 0;
+			const items = doc.edges.map((e, i) => {
+				const a = indexOfName(e.from), b = indexOfName(e.to);
+				if (a < 0 || b < 0) return null;
+				const word = pillWord(e.payload), sr = route(e, a, b), r = sr || freeRoute(i, a, b);
+				const t = { e: e, i: i, d: r.d, x: r.x, y: r.y, word: word, w: 7 * word.length + 10 };
+				if (!sr) free.push(t);
+				return t;
+			});
+			// Free labels move apart as the server's do: 20 units down from a label
+			// that they meet, and from a card. It ends: each step goes down, and
+			// below every card and label there is room.
+			const placed = [];
+			free.sort((p, q) => p.x - q.x || p.y - q.y).forEach((t) => {
+				while (placed.some((o) => Math.abs(o.x - t.x) < (o.w + t.w) / 2 + 4 && Math.abs(o.y - t.y) < 20) || pos.some((c) => t.x + t.w / 2 > c.x && t.x - t.w / 2 < c.x + NW && t.y + 8 > c.y && t.y - 8 < c.y + NH)) t.y += 20;
+				placed.push(t);
+				labelLow = Math.max(labelLow, t.y + 10);
+			});
+			items.forEach((t) => {
+				if (!t) return;
+				const e = t.e, i = t.i, d = t.d, dim = path && !path.edge(e) ? " dim" : "";
+				// Live: an edge from a complete node has flowed. Data moves along an
+				// edge into a running node, unless the edge only sets the order.
+				const fa = liveFrame(e.from), fb = liveFrame(e.to);
+				const flow = (fa && fa.status === "complete" ? " flowed" : "") + (fb && fb.status === "running" && e.payload !== "none" ? " flowing" : "");
+				edgesG.appendChild(svgEl("path", { d: d, "marker-end": "url(#arrow)", class: "edge " + (e.payload || "summary") + flow + (sel && sel.k === "edge" && sel.i === i ? " sel" : "") + (check.problems.some((p) => p.edge === i) ? " badedge" : "") + dim }));
+				edgesG.appendChild(svgEl("path", { d: d, class: "hit", "data-edge": i }));
+				const pill = svgEl("g", { class: "pill" + dim, "data-edge": i, transform: "translate(" + t.x + " " + t.y + ")" });
+				pill.appendChild(svgEl("rect", { x: -t.w / 2, y: -8, width: t.w, height: 16, rx: 8 }));
+				pill.appendChild(svgEl("text", { y: 4, "text-anchor": "middle" })).textContent = t.word;
+				pills.push(pill);
+			});
+			pills.forEach((p) => edgesG.appendChild(p));
+		}
+		function setZoom(z, quiet) {
 			zoom = Math.min(Math.max(z, 0.3), 2);
 			sizePlane();
-			say("Zoom " + Math.round(zoom * 100) + "%.");
+			if (!quiet) say("Zoom " + Math.round(zoom * 100) + "%.");
 		}
-		function fit() {
+		// fit zooms out until the whole graph shows. The Fit tool and f go as
+		// low as setZoom allows. On load, fit is quiet, runs only when the graph
+		// does not fit, and stops at MINFIT so the cards stay readable: the
+		// canvas then scrolls to the root column.
+		const MINFIT = 0.85;
+		function fit(auto) {
 			let w = 0, h = 0;
 			pos.forEach((p) => { w = Math.max(w, p.x + NW + PAD); h = Math.max(h, p.y + NH + PAD); });
-			if (w && h) setZoom(Math.min(wrap.clientWidth / w, wrap.clientHeight / h, 1));
+			if (!w || (auto && w <= wrap.clientWidth && h <= wrap.clientHeight)) return;
+			const z = Math.min(wrap.clientWidth / w, wrap.clientHeight / h, 1);
+			setZoom(auto ? Math.max(z, MINFIT) : z, auto);
 			wrap.scrollTo(0, 0);
+			if (auto && z < MINFIT) scrollToRoot();
+		}
+		// scrollToRoot shows the left column, with its first node in view.
+		function scrollToRoot() {
+			const roots = doc.nodes.map((n, i) => i).filter((i) => !doc.edges.some((e) => e.to === doc.nodes[i].name));
+			const i = roots.length ? roots.reduce((a, b) => (pos[b].x < pos[a].x || (pos[b].x === pos[a].x && pos[b].y < pos[a].y) ? b : a)) : 0;
+			wrap.scrollTo(0, Math.max(0, (pos[i].y + NH / 2) * zoom - wrap.clientHeight / 2));
+		}
+		// routed is the last server layout: the node names, their positions, and
+		// the routed path of each edge, which goes around the cards. An edge uses
+		// its routed path while the node set is the same, both of its ends are
+		// at their layout positions, and no card that left its layout position
+		// sits on the path. Else it takes its free route.
+		let routed = null;
+		const nodeSet = () => doc.nodes.map((n) => n.name).join("\n");
+		// layoutFor asks the server layout of the draft as it is now. The reply
+		// keeps the node names of the request, so a later edit cannot pair with it.
+		function layoutFor() {
+			const names = doc.nodes.map((n) => n.name);
+			return api("POST", "layout", { doc: doc }).then((d) => {
+				const at = {}, paths = {};
+				names.forEach((name, i) => { if (d.positions[i]) at[name] = d.positions[i]; });
+				(d.paths || []).forEach((p) => { paths[p.from + "\n" + p.to] = p; });
+				routed = { nodes: names.join("\n"), at: at, paths: paths };
+				return d;
+			});
+		}
+		function route(e, a, b) {
+			const r = routed && routed.nodes === nodeSet() && routed.paths[e.from + "\n" + e.to];
+			const still = (name, p) => { const q = routed.at[name]; return !!q && q.x === p.x && q.y === p.y; };
+			if (!(r && still(e.from, pos[a]) && still(e.to, pos[b]))) return null;
+			// A card that left its layout position may now sit on this path.
+			const moved = pos.filter((p, k) => !still(doc.nodes[k].name, p));
+			r.pts = r.pts || pathPoints(r.d);
+			return moved.length && blockers(r.pts, moved).length ? null : r;
 		}
 		function relayout() {
-			api("POST", "layout", { doc: doc })
-				.then((d) => say(commit(() => { pos = d.positions; }) ? "Laid out as the viewer draws it. Press u to undo." : "The graph already has the viewer layout."))
+			layoutFor()
+				.then((d) => {
+					const moved = commit(() => { pos = d.positions; });
+					if (!moved) { drawEdges(); sizePlane(); }
+					say(moved ? "Laid out as the viewer draws it. Press u to undo." : "The graph already has the viewer layout.");
+				})
 				.catch((err) => say(err.message, "error"));
 		}
+
+		// Panel folds. On a wide screen the Nodes panel and the inspector fold
+		// to a slim rail, so the canvas gets the width. The choice persists in
+		// localStorage when the browser allows it. Folds have no animation.
+		const folds = { palette: "pal-folded", panel: "insp-folded" };
+		function setFold(id, folded, save) {
+			document.body.classList.toggle(folds[id], folded);
+			const b = document.querySelector('[data-fold="' + id + '"]'), left = id === "palette";
+			b.setAttribute("aria-expanded", String(!folded));
+			b.setAttribute("aria-label", (folded ? "Show the " : "Hide the ") + (left ? "Nodes panel" : "inspector"));
+			b.textContent = folded === left ? "›" : "‹";
+			if (save) try { localStorage.setItem("splice.editor.fold." + id, folded ? "1" : ""); } catch (e) { /* the page works without storage */ }
+			sizePlane();
+		}
+		function unfold(id) {
+			if (document.body.classList.contains(folds[id])) setFold(id, false, false);
+		}
+		// showPanel opens the inspector: a sheet on a narrow screen, unfolded on a wide one.
+		function showPanel() {
+			document.body.classList.add("sheet");
+			unfold("panel");
+		}
+		Object.keys(folds).forEach((id) => {
+			let folded = false;
+			try { folded = localStorage.getItem("splice.editor.fold." + id) === "1"; } catch (e) { /* no storage: unfolded */ }
+			setFold(id, folded, false);
+			document.querySelector('[data-fold="' + id + '"]').addEventListener("click", () => setFold(id, !document.body.classList.contains(folds[id]), true));
+		});
 
 		// Selection and panels.
 		// focus selects, so an action that moves the focus decides the selection.
@@ -310,6 +611,7 @@
 			sel = s;
 			if (link && !(s && s.k === "node")) endLink();
 			document.body.classList.toggle("sheet", !!s);
+			if (s) unfold("panel");
 			render();
 			fillPanel();
 			if (focus && s && s.k === "node" && card(s.i)) {
@@ -476,11 +778,12 @@
 			const warn = $("warnings");
 			warn.textContent = "";
 			(check.warnings || []).forEach((w) => warn.appendChild(el("li", "", "[~] " + w)));
+			if (!check.problems.length && !warn.children.length) list.appendChild(el("li", "none", "[+] None."));
 		}
 		function goTo(p) {
 			if (p.index !== undefined && p.index < doc.nodes.length) select({ k: "node", i: p.index }, false);
 			else if (p.edge !== undefined && p.edge < doc.edges.length) select({ k: "edge", i: p.edge }, false);
-			else { select(null, false); document.body.classList.add("sheet"); }
+			else { select(null, false); showPanel(); }
 			showTab("form");
 			const slot = p.field && panel.querySelector('form:not([hidden]) [data-err="' + p.field + '"]');
 			const box = slot && slot.closest(".f");
@@ -503,6 +806,7 @@
 
 		// Edits.
 		function openPalette(from) {
+			unfold("palette");
 			after = from;
 			document.body.classList.add("palopen");
 			$("pal-hint").textContent = from >= 0 ? "Choose a type. The node goes after " + doc.nodes[from].name + "." : "Choose a type to add a node.";
@@ -521,14 +825,18 @@
 			let name = base, k = 2;
 			while (indexOfName(name) >= 0) name = (types[type] && types[type].builtin ? type + "-" : type + "-") + k++;
 			const from = after;
-			const anchor = from >= 0 ? pos[from] : sel && sel.k === "node" ? pos[sel.i] : pos.reduce((low, p) => (p.y > low.y ? p : low), { x: PAD, y: PAD - NH - GAP });
+			// The new node goes in the next column: right of the anchor, else right
+			// of the rightmost node. It moves down until it covers no node.
+			const anchor = from >= 0 ? pos[from] : sel && sel.k === "node" ? pos[sel.i] : pos.reduce((right, p) => (p.x > right.x ? p : right), { x: PAD - NW - GAPX, y: PAD });
+			const at = { x: anchor.x + NW + GAPX, y: anchor.y };
+			while (pos.some((p) => Math.abs(p.x - at.x) < NW + 8 && Math.abs(p.y - at.y) < NH + 8)) at.y += NH + GAPY;
 			const node = { name: name, type: type };
 			if (facts(type).prompt) node.prompt = "";
 			commit(() => {
 				// Inside the change, so undo takes the version back too.
 				if (type === "agent" && !doc.splice_min_version) doc.splice_min_version = boot.agent_min;
 				doc.nodes.push(node);
-				pos.push({ x: anchor.x, y: anchor.y + NH + GAP });
+				pos.push(at);
 				if (from >= 0) doc.edges.push({ from: doc.nodes[from].name, to: name });
 			});
 			closePalette();
@@ -631,16 +939,21 @@
 			}
 			return note;
 		}
+		// numberOrNone returns a whole number for a count field: a fraction is
+		// truncated, and a value beyond the safe integer range is clamped.
 		function numberOrNone(v) {
 			const t = String(v).trim();
-			return t === "" ? undefined : Number(t);
+			if (t === "") return undefined;
+			const x = Number(t), whole = Math.trunc(Math.min(Math.max(x, -Number.MAX_SAFE_INTEGER), Number.MAX_SAFE_INTEGER));
+			// A positive value below 1 becomes 1, since a turn limit of 0 means the default.
+			// A negative value above -1 becomes -1, so the server reports it.
+			return x > 0 && whole < 1 ? 1 : x < 0 && whole > -1 ? -1 : whole;
 		}
 		function setOrDelete(obj, k, v) {
 			if (v === undefined || v === "") delete obj[k];
 			else obj[k] = v;
 		}
 		const checked = (sel2, k) => Array.prototype.filter.call(nodeForm.querySelectorAll(sel2), (c) => c.checked).map((c) => c.dataset[k]);
-
 		nodeForm.addEventListener("input", (e) => {
 			const t = e.target, i = inspected(), n = doc.nodes[i];
 			const key = "n" + i + (t.id || t.dataset.tier || t.dataset.tool || t.dataset.cap || "a" + t.dataset.argv);
@@ -664,6 +977,11 @@
 				switch (t.dataset.k) {
 					case "name": {
 						const old = n.name;
+						// A name that another node has would make edges ambiguous, so it is refused.
+						if (t.value !== old && indexOfName(t.value) >= 0) {
+							say("Another node is named " + (t.value || "(no name)") + ". The name stays " + (old || "(no name)") + " until it is unique.", "error");
+							break;
+						}
 						commit(() => {
 							if (unique(old)) doc.edges.forEach((ed) => { if (ed.from === old) ed.from = t.value; if (ed.to === old) ed.to = t.value; });
 							n.name = t.value;
@@ -744,6 +1062,18 @@
 				} else setOrDelete(doc, t.dataset.k, t.value);
 			}, "t" + t.id);
 		});
+		// A refused name is not kept in the box: leaving the field restores the document's name.
+		$("n-name").addEventListener("change", () => {
+			const i = inspected();
+			if (i < 0 || $("n-name").value === doc.nodes[i].name) return;
+			setVal("n-name", doc.nodes[i].name);
+			say("The name was kept as " + (doc.nodes[i].name || "(no name)") + ".", "error");
+		});
+		// A number box shows the stored value once the user leaves it.
+		["n-in", "n-out", "n-turns", "t-in", "t-out"].forEach((id) => $(id).addEventListener("change", () => {
+			const v = numberOrNone($(id).value);
+			if (v !== undefined) setVal(id, v);
+		}));
 		[topoForm, nodeForm].forEach((f) => f.addEventListener("submit", (e) => e.preventDefault()));
 
 		// Palette.
@@ -790,15 +1120,17 @@
 			if (!(sel && sel.k === "node" && sel.i === i)) select({ k: "node", i: i }, false);
 			const live = card(i);
 			live.focus({ preventScroll: true });
-			drag = { i: i, el: live, sx: e.clientX, sy: e.clientY, ox: pos[i].x, oy: pos[i].y, moved: false };
+			drag = { i: i, sx: e.clientX, sy: e.clientY, ox: pos[i].x, oy: pos[i].y, moved: false };
 			live.setPointerCapture(e.pointerId);
 		});
 		// endDrag puts a dragged node back. A move with no button ends a drag
 		// whose pointerup was missed, so a hover never moves a node.
 		function endDrag() {
-			if (drag && drag.el) {
+			const el = drag && card(drag.i);
+			if (el) {
 				pos[drag.i] = { x: drag.ox, y: drag.oy };
-				place(drag.el, pos[drag.i]);
+				place(el, pos[drag.i]);
+				freeCache = {};
 				drawEdges();
 			}
 			rubber.setAttribute("d", "");
@@ -810,7 +1142,7 @@
 			if (!e.buttons) return endDrag();
 			if (drag.link !== undefined) {
 				const a = pos[drag.link], p = planePoint(e);
-				rubber.setAttribute("d", "M" + (a.x + NW / 2 - 14) + " " + (a.y + NH) + " L" + p.x + " " + p.y);
+				rubber.setAttribute("d", "M" + (a.x + NW) + " " + (a.y + PORTY) + " L" + p.x + " " + p.y);
 				return;
 			}
 			const dx = (e.clientX - drag.sx) / zoom, dy = (e.clientY - drag.sy) / zoom;
@@ -818,15 +1150,17 @@
 			drag.moved = true;
 			drag.nx = Math.max(0, drag.ox + dx);
 			drag.ny = Math.max(0, drag.oy + dy);
-			drag.el.classList.add("dragging");
+			if (card(drag.i)) card(drag.i).classList.add("dragging");
 			if (!raf) raf = requestAnimationFrame(frame);
 		});
 		// frame moves the dragged node by its transform, once per animation frame.
 		function frame() {
 			raf = 0;
 			if (!drag || drag.link !== undefined) return;
+			const old = pos[drag.i];
 			pos[drag.i] = { x: drag.nx, y: drag.ny };
-			place(drag.el, pos[drag.i]);
+			if (card(drag.i)) place(card(drag.i), pos[drag.i]);
+			reroute(drag.i, old, pos[drag.i]);
 			drawEdges();
 		}
 		document.addEventListener("pointerup", (e) => {
@@ -844,7 +1178,13 @@
 			if (raf) { cancelAnimationFrame(raf); raf = 0; }
 			const final = { x: d.nx, y: d.ny };
 			pos[d.i] = { x: d.ox, y: d.oy };
-			commit(() => { pos[d.i] = final; });
+			// A drop at the start position changes nothing, so commit draws
+			// nothing: put the card and its edges back here.
+			if (!commit(() => { pos[d.i] = final; })) {
+				if (card(d.i)) place(card(d.i), pos[d.i]);
+				freeCache = {};
+				drawEdges();
+			}
 		});
 		wrap.addEventListener("click", (e) => {
 			const hit = e.target.closest("[data-edge]");
@@ -892,8 +1232,8 @@
 				case "u": travel(undo, redo, "undo"); break;
 				case "U": travel(redo, undo, "redo"); break;
 				case "p": publish(); break;
-				case "s": select(null, false); showTab("form"); document.body.classList.add("sheet"); $("t-name").focus(); break;
-				case "j": document.body.classList.add("sheet"); showTab("json"); $("json").focus(); break;
+				case "s": select(null, false); showTab("form"); showPanel(); $("t-name").focus(); break;
+				case "j": showPanel(); showTab("json"); $("json").focus(); break;
 				case "?": $("keys").showModal(); break;
 				case "+": case "=": setZoom(zoom * 1.2); break;
 				case "-": setZoom(zoom / 1.2); break;
@@ -904,7 +1244,7 @@
 				case "Backspace": removeSel(); break;
 				case "Enter":
 					if (link) finishLink(link.target);
-					else if (sel) { document.body.classList.add("sheet"); showTab("form"); (sel.k === "node" ? $("n-name") : $("deps").querySelector("li.hl select") || $("dep-add")).focus(); }
+					else if (sel) { showPanel(); showTab("form"); (sel.k === "node" ? $("n-name") : $("deps").querySelector("li.hl select") || $("dep-add")).focus(); }
 					else return;
 					break;
 				case "ArrowLeft":
@@ -923,7 +1263,7 @@
 		on("nodes-open", () => openPalette(-1));
 		on("undo", () => travel(undo, redo, "undo"));
 		on("redo", () => travel(redo, undo, "redo"));
-		on("settings", () => { select(null, false); showTab("form"); document.body.classList.add("sheet"); $("t-name").focus(); });
+		on("settings", () => { select(null, false); showTab("form"); showPanel(); $("t-name").focus(); });
 		on("validate", () => {
 			dirty = true;
 			settle().then(() => {
@@ -934,7 +1274,7 @@
 		});
 		on("z-in", () => setZoom(zoom * 1.2));
 		on("z-out", () => setZoom(zoom / 1.2));
-		on("z-fit", fit);
+		on("z-fit", () => fit());
 		on("z-reset", () => { setZoom(1); wrap.scrollTo(0, 0); });
 		on("relayout", relayout);
 		on("help", () => $("keys").showModal());
@@ -1038,8 +1378,80 @@
 		});
 		pubCancel.addEventListener("click", () => dialog.close());
 
+		// Live run. The editor shows the run of the pipeline viewer on the nodes
+		// with the same name. It loads the viewer's graph state and follows its
+		// stream, with the rules of pipeline.js. A server without the viewer,
+		// such as `splice pipeline edit`, says so in the boot data.
+		function liveGraph() {
+			return fetch("../pipeline/graph").then((r) => {
+				if (!r.ok) throw new Error(String(r.status));
+				return r.json();
+			}).then((d) => {
+				if (liveEnded) return;
+				liveHead = d;
+				live = Object.create(null);
+				// The static graph is the active topology, not a run: nothing to paint.
+				if (d.run_state !== "static") (d.nodes || []).forEach((f) => { live[f.name] = f; });
+				paintLive();
+			});
+		}
+		function paintLive() {
+			doc.nodes.forEach((n, i) => { if (card(i)) paintCard(card(i), n, nodeProblems(i).length); });
+			drawEdges();
+			showLive();
+		}
+		// showLive is the run line in the top bar: the viewer's run text, and a
+		// note when the draft is not the topology that runs.
+		function showLive() {
+			const line = $("live"), d = liveHead;
+			const on = !!d && d.run_state !== "static";
+			line.hidden = !on && !liveNote;
+			if (!on) { line.textContent = liveNote; line.dataset.state = "stopped"; return; }
+			// The topology name shows only when it is not the draft name.
+			const about = [d.topology === doc.name ? "" : d.topology, d.facts].filter(Boolean).join(", ");
+			line.dataset.state = d.run_state;
+			line.textContent = "Run" + (about ? " (" + about + ")" : "") + ": " + d.run + (d.topology !== doc.name ? " The draft differs from the run. Live state shows on the nodes with the same name." : "");
+		}
+		function endLive(note) {
+			const ran = liveHead && liveHead.run_state !== "static";
+			liveEnded = true;
+			if (source) source.close();
+			live = Object.create(null);
+			liveHead = null;
+			liveNote = ran ? note : "";
+			paintLive();
+		}
+		// boot.viewer is false on a server without the viewer: no request, no stream.
+		(boot.viewer ? liveGraph() : Promise.reject(new Error("no viewer"))).then(() => {
+			source = new EventSource("../../events");
+			const listen = (name, fn) => source.addEventListener(name, (e) => {
+				if (liveEnded) return;
+				try { fn(JSON.parse(e.data)); } catch (err) { /* a malformed event changes nothing */ }
+			});
+			listen("pipeline-node", (f) => {
+				if (!liveHead || f.run_seq !== liveHead.run_seq || liveHead.run_state === "static") return;
+				live[f.name] = f;
+				paintLive();
+			});
+			// A graph event is a new run, a new layout, or a new run line: load it all.
+			listen("pipeline-graph", () => { liveGraph().catch(() => {}); });
+			source.addEventListener("session-changed", () => endLive("The terminal session changed, so the live run state stopped."));
+			// The browser retries a lost stream by itself. Three failed tries in a
+			// row, or a lost stream after the run ended, mean that the server stopped.
+			let failures = 0;
+			source.addEventListener("open", () => { failures = 0; if (!liveEnded) liveGraph().catch(() => {}); });
+			source.addEventListener("error", () => {
+				if (liveEnded) return;
+				const state = liveHead ? liveHead.run_state : "";
+				if (++failures >= 3 || source.readyState === EventSource.CLOSED || state === "completed" || state === "failed" || state === "cancelled") endLive("Splice stopped serving the live run state.");
+			});
+		}).catch(() => { /* no viewer on this server: no live state */ });
+
 		render();
 		fillPanel();
+		fit(true);
+		// A draft at its auto-layout positions shows the routed edges at once.
+		layoutFor().then(() => { drawEdges(); sizePlane(); }).catch(() => {});
 		if (!doc.nodes.length) $("pal-search").focus();
 	}
 })();

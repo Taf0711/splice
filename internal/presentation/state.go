@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+
+	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 // PresentationSchemaVersionV1 is the schema version of this contract. Every
@@ -127,6 +129,14 @@ type CompletionReceipt struct {
 	// Unverified marks a completed run that verified nothing. Detail names why.
 	// It is only valid with status completed.
 	Unverified bool `json:"unverified,omitempty"`
+	// CommandPassed marks an unverified run whose test command passed with no
+	// per-test evidence. It has its own receipt. It is only valid with
+	// Unverified.
+	CommandPassed bool `json:"command_passed,omitempty"`
+	// Checks lists the verification checks of the final pass, so an
+	// unverified receipt names each check and its outcome. It is only set
+	// for an unverified run.
+	Checks []schemas.VerificationCheck `json:"checks,omitempty"`
 }
 
 // Validate checks the closed completion status and non-negative counts.
@@ -144,6 +154,15 @@ func (c CompletionReceipt) Validate() error {
 	}
 	if c.Unverified && c.Status != "completed" {
 		return fmt.Errorf("completion %s: only a completed run can be unverified", c.Status)
+	}
+	if c.CommandPassed && !c.Unverified {
+		return fmt.Errorf("completion %s: a passed test command without per-test evidence must be unverified", c.Status)
+	}
+	if len(c.Checks) > 0 && !c.Unverified {
+		return fmt.Errorf("completion %s: checks are only carried for an unverified run", c.Status)
+	}
+	if err := schemas.ValidateVerificationChecks(c.Checks, false); err != nil {
+		return fmt.Errorf("completion %s: %w", c.Status, err)
 	}
 	if c.Status == "cancelled" && c.Applied > 0 {
 		return fmt.Errorf("completion cancelled: %d applied files contradicts the staged-not-applied invariant; cancelled means work did not reach the tree", c.Applied)

@@ -4,10 +4,55 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
+	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
+
+const (
+	// goTestReportFile receives the go test -json stream when the run has a
+	// private report directory. The bash tool truncates large output, so the
+	// file is the complete stream.
+	goTestReportFile = "report.jsonl"
+	// maxGoReportBytes caps the report file that is read. A larger file is
+	// not parsed and the stdout path is used.
+	maxGoReportBytes = 64 << 20
+	// maxStoredGoStdoutBytes bounds the report text kept in
+	// TestRunResults.Stdout. Only the tail is kept.
+	maxStoredGoStdoutBytes = 200_000
+	// maxGoOutputEventBytes bounds the output text kept from one go test
+	// output event. Only the tail of a test's output reaches its message.
+	maxGoOutputEventBytes = 64 << 10
+)
+
+// readGoTestReport reads the go test -json report from the private report
+// directory. ok is false when there is no directory, or when the file is
+// missing, empty, a symbolic link, or over the cap.
+func readGoTestReport(dir string) ([]byte, bool) {
+	if !isRealDirectory(dir) {
+		return nil, false
+	}
+	data, ok := readCappedFile(filepath.Join(dir, goTestReportFile), maxGoReportBytes)
+	if !ok || len(data) == 0 {
+		return nil, false
+	}
+	return data, true
+}
+
+// lastBytes returns the last n bytes of s, moved forward to a rune boundary.
+func lastBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	start := len(s) - n
+	for start < len(s) && !utf8.RuneStart(s[start]) {
+		start++
+	}
+	return s[start:]
+}
 
 // goTestEvent is one line of `go test -json` output.
 type goTestEvent struct {
@@ -24,6 +69,10 @@ type goTestEvent struct {
 // maxPerTestEntries bounds how many per-test entries one parse can produce.
 const maxPerTestEntries = 200
 
+// unfinishedTestMessage is the message of a test that started and did not
+// finish.
+const unfinishedTestMessage = "test did not finish (timeout or killed)"
+
 // parseGoTestJSON decodes `go test -json` output into per-test results plus
 // build-error entries. It returns (results, ok): ok is false when the output
 // is not valid go-test JSON (empty, truncated, or a different format), so the
@@ -32,60 +81,78 @@ const maxPerTestEntries = 200
 // lines as the message, and a build failure never reports a passing suite.
 func parseGoTestJSON(output string) (schemas.TestRunResults, bool) {
 	var results schemas.TestRunResults
+	// State is keyed by package and test name: the same test name in two
+	// packages is two tests.
+	type testKey struct{ pkg, test string }
 	type testState struct {
+		pkg     string
+		name    string
 		output  strings.Builder
 		elapsed float64
 		done    bool
 		skipped bool
 		failed  bool
 	}
-	states := map[string]*testState{}
-	var order []string
+	states := map[testKey]*testState{}
+	var order []testKey
 	var buildMessages []string
 	anyEvent := false
 
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "{") {
-			continue
+	// The reader has no per-line cap. The caller bounds the whole output, and
+	// a long line must not stop the scan before the terminal events.
+	reader := bufio.NewReader(strings.NewReader(output))
+	for {
+		raw, readErr := reader.ReadString('\n')
+		if readErr != nil && readErr != io.EOF {
+			return results, false
 		}
-		var event goTestEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "{") {
+			var event goTestEvent
+			if err := json.Unmarshal([]byte(line), &event); err == nil {
+				anyEvent = true
+				switch event.Action {
+				case "run", "pass", "fail", "skip", "output":
+					if event.Test == "" {
+						break
+					}
+					key := testKey{pkg: event.Package, test: event.Test}
+					state := states[key]
+					if state == nil {
+						name := event.Test
+						if event.Package != "" {
+							name = event.Package + "." + event.Test
+						}
+						state = &testState{pkg: event.Package, name: name}
+						states[key] = state
+						order = append(order, key)
+					}
+					if event.Action == "output" {
+						// One huge output event keeps only its tail. The message
+						// is trimmed to its last lines anyway.
+						state.output.WriteString(lastBytes(event.Output, maxGoOutputEventBytes))
+					}
+					if event.Action == "pass" || event.Action == "fail" || event.Action == "skip" {
+						state.done = true
+						state.elapsed = event.Elapsed
+						state.skipped = event.Action == "skip"
+						state.failed = event.Action == "fail"
+					}
+				case "build-output":
+					if event.Output != "" {
+						buildMessages = append(buildMessages, event.Output)
+					}
+				case "build-fail":
+					pkg := event.ImportPath
+					if pkg == "" {
+						pkg = "unknown package"
+					}
+					buildMessages = append(buildMessages, fmt.Sprintf("build failed: %s", pkg))
+				}
+			}
 		}
-		anyEvent = true
-		switch event.Action {
-		case "run", "pass", "fail", "skip", "output":
-			if event.Test == "" {
-				continue
-			}
-			state := states[event.Test]
-			if state == nil {
-				state = &testState{}
-				states[event.Test] = state
-				order = append(order, event.Test)
-			}
-			if event.Action == "output" {
-				state.output.WriteString(event.Output)
-			}
-			if event.Action == "pass" || event.Action == "fail" || event.Action == "skip" {
-				state.done = true
-				state.elapsed = event.Elapsed
-				state.skipped = event.Action == "skip"
-				state.failed = event.Action == "fail"
-			}
-		case "build-output":
-			if event.Output != "" {
-				buildMessages = append(buildMessages, event.Output)
-			}
-		case "build-fail":
-			pkg := event.ImportPath
-			if pkg == "" {
-				pkg = "unknown package"
-			}
-			buildMessages = append(buildMessages, fmt.Sprintf("build failed: %s", pkg))
+		if readErr == io.EOF {
+			break
 		}
 	}
 	if !anyEvent {
@@ -98,28 +165,36 @@ func parseGoTestJSON(output string) (schemas.TestRunResults, bool) {
 		results.Tests = append(results.Tests, compileErrorEntries(buildMessages)...)
 	}
 
-	for _, name := range order {
-		if len(results.Tests) >= maxPerTestEntries {
-			break
+	for _, key := range order {
+		state := states[key]
+		// The cap drops only passed and skipped entries: a failed or
+		// unfinished test is the evidence and is always kept.
+		if len(results.Tests) >= maxPerTestEntries && state.done && !state.failed {
+			continue
 		}
-		state := states[name]
+		message := trimTestOutput(state.output.String())
 		status := "failed"
 		switch {
+		case !state.done:
+			// A run event with no terminal pass, fail, or skip: the test
+			// binary timed out (-timeout) or was killed. Never a pass.
+			status = "errored"
+			message = strings.TrimSpace(unfinishedTestMessage + "\n" + message)
 		case state.skipped:
 			status = "skipped"
 		case !state.failed:
 			status = "passed"
 		}
 		entry := schemas.TestCaseResult{
-			Name:       name,
+			Name:       BoundEntryName(state.name),
+			Package:    state.pkg,
 			Status:     status,
 			DurationMs: int(state.elapsed * 1000),
-		}
-		if message := trimTestOutput(state.output.String()); message != "" {
-			entry.Message = message
+			Message:    message,
 		}
 		results.Tests = append(results.Tests, entry)
 	}
+	results.Tests = capFailedEntries(results.Tests)
 	return results, true
 }
 
@@ -139,7 +214,7 @@ func compileErrorEntries(messages []string) []schemas.TestCaseResult {
 			name = "build " + currentPkg
 		}
 		entries = append(entries, schemas.TestCaseResult{
-			Name:    name,
+			Name:    BoundEntryName(name),
 			Status:  "errored",
 			Message: strings.TrimSpace(strings.Join(currentLines, "\n")),
 		})

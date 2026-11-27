@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -69,13 +70,14 @@ func (c banditCheck) Run(ctx context.Context, req VerificationCheckRequest) (Ver
 		}
 		out = []byte(res.Output)
 	} else {
-		command := append([]string{"python", "-m", "bandit", "-f", "json"}, pyPaths...)
+		command := append([]string{"python", "-m", "bandit", "-q", "-f", "json"}, pyPaths...)
 		cmd, plan, cerr := PrepareStageCommand(ctx, req.Sandbox, req.WorkDir, command)
 		if cerr != nil {
 			return VerificationCheckResult{}, fmt.Errorf("bandit tool refused: %w", cerr)
 		}
 		defer plan.Cleanup()
 		out, err = cmd.CombinedOutput()
+		procrun.ReportRun(ctx, cmd, err)
 		if err != nil && !strings.Contains(string(out), `"results"`) {
 			outLower := strings.ToLower(string(out))
 			if strings.Contains(outLower, "no module named bandit") || strings.Contains(outLower, "not found") {
@@ -133,6 +135,9 @@ func (c banditCheck) Run(ctx context.Context, req VerificationCheckRequest) (Ver
 		status = schemas.VerificationFindings
 		summary = fmt.Sprintf("Bandit found %d security issue(s).", len(findings))
 	}
+	if report.OmittedResults > 0 {
+		summary += fmt.Sprintf(" %d lower-severity Bandit findings omitted.", report.OmittedResults)
+	}
 	return VerificationCheckResult{
 		ToolRun: schemas.VerificationToolRun{
 			Tool:     c.Name(),
@@ -153,6 +158,9 @@ type banditReport struct {
 		IssueSeverity string `json:"issue_severity"`
 		TestID        string `json:"test_id"`
 	} `json:"results"`
+	// OmittedResults counts lower-severity results the tool dropped to fit
+	// its output budget.
+	OmittedResults int `json:"omitted_results"`
 }
 
 func filterPythonPaths(paths []string) []string {

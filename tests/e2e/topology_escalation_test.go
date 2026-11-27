@@ -32,9 +32,10 @@ func TestT08EscalationOverridesPin(t *testing.T) {
 		"escalation": map[string]any{"provider_profile": "fake", "model": "escalated-model"},
 	})
 
-	// Identical output on every call. The run makes four code writer requests
-	// before the switch and six after it, then stops at the iteration limit.
-	const codeWriterReplies = 10
+	// Identical output on every call. The first pass stalls on repair, so the
+	// run switches to the escalation model. The escalated pass stalls too and
+	// stops the run, so four code writer requests are made in total.
+	const codeWriterReplies = 4
 	for i := 0; i < codeWriterReplies; i++ {
 		s.Provider.Script(StageCodeWriter, SubmitCode(t01Prompt,
 			File("main.go", "modify", helloMain),
@@ -65,10 +66,10 @@ func TestT08EscalationOverridesPin(t *testing.T) {
 	if unused := s.Provider.Unused(); len(unused) > 0 {
 		t.Errorf("unused scripted replies: %v", unused)
 	}
-	// Four pinned requests, then the escalated model for every later request.
+	// Two pinned requests in the first pass, then the escalated model.
 	for i, model := range models {
 		want := "escalated-model"
-		if i < 4 {
+		if i < 2 {
 			want = "pinned-model"
 		}
 		if model != want {

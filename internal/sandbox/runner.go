@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 
 	"github.com/Taf0711/splice/internal/secrets"
+	"github.com/Taf0711/splice/internal/tempgc"
 )
 
 var errNativeSandboxUnavailable = errors.New("native sandbox backend is unavailable")
@@ -81,6 +82,7 @@ func (engine *Engine) CommandContext(ctx context.Context, spec CommandSpec) (*ex
 	command := exec.CommandContext(ctx, plan.Name, plan.Args...)
 	command.Dir = plan.Dir
 	command.Env = plan.Env
+	HardenProcessLifetime(command)
 	return command, plan, nil
 }
 
@@ -213,7 +215,7 @@ func linuxSandboxHelperCommandPlan(execRequest SandboxExecutionRequest, policy P
 	if err != nil {
 		return CommandPlan{}, err
 	}
-	env, err := sandboxEnvironmentForCommandChecked(spec.Env, policy, BackendLinuxBwrap, execRequest.WorkspaceRoot)
+	env, err := sandboxEnvironmentForCommandChecked(spec.Env, policy, BackendLinuxBwrap, execRequest.WorkspaceRoot, execRequest.PermissionProfile)
 	if err != nil {
 		return CommandPlan{}, err
 	}
@@ -250,6 +252,13 @@ func withSandboxExecutionMetadata(plan CommandPlan, request SandboxExecutionRequ
 }
 
 func directCommandPlan(spec CommandSpec, backend Backend, policy Policy, workspaceRoot string) CommandPlan {
+	// An unwrapped command with no explicit environment scrubs credential-bearing
+	// variables, the same as the wrapped and escalated paths. An explicit Env
+	// travels verbatim.
+	env := cloneStrings(spec.Env)
+	if spec.Env == nil {
+		env = secrets.ScrubChildEnv(os.Environ())
+	}
 	return CommandPlan{
 		Backend:           backend,
 		TargetBackend:     backend.TargetBackend(),
@@ -262,7 +271,7 @@ func directCommandPlan(spec CommandSpec, backend Backend, policy Policy, workspa
 		Name:              spec.Name,
 		Args:              cloneStrings(spec.Args),
 		Dir:               spec.Dir,
-		Env:               cloneStrings(spec.Env),
+		Env:               env,
 	}
 }
 
@@ -332,7 +341,7 @@ func seatbeltCommandPlanWithProfileChecked(spec CommandSpec, workspaceRoot strin
 	if envBackend == "" {
 		envBackend = BackendMacOSSeatbelt
 	}
-	env, err := sandboxEnvironmentForCommandChecked(spec.Env, policy, envBackend, workspaceRoot)
+	env, err := sandboxEnvironmentForCommandChecked(spec.Env, policy, envBackend, workspaceRoot, profile)
 	if err != nil {
 		return CommandPlan{}, err
 	}
@@ -382,6 +391,17 @@ func sandboxEnvironment(policy Policy, backend BackendName, workspaceRoot string
 	return sandboxEnvironmentForCommandWithRoot(nil, policy, backend, workspaceRoot)
 }
 
+// sandboxEnvironmentForCommandWithRoot builds the profile from policy alone.
+// Production plans pass the real profile (with any scope) to the checked helper.
+func sandboxEnvironmentForCommandWithRoot(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) []string {
+	profile := PermissionProfileFromPolicy(workspaceRoot, policy, nil)
+	env, err := sandboxEnvironmentForCommandChecked(specEnv, policy, backend, workspaceRoot, profile)
+	if err != nil {
+		return cloneStrings(specEnv)
+	}
+	return env
+}
+
 // sandboxEnvironmentForCommand keeps the original no-error helper used by
 // package tests and compatibility callers. Production command plans use the
 // checked variant below so cache setup failures stop the command clearly.
@@ -389,15 +409,7 @@ func sandboxEnvironmentForCommand(specEnv []string, policy Policy, backend Backe
 	return sandboxEnvironmentForCommandWithRoot(specEnv, policy, backend, "")
 }
 
-func sandboxEnvironmentForCommandWithRoot(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) []string {
-	env, err := sandboxEnvironmentForCommandChecked(specEnv, policy, backend, workspaceRoot)
-	if err != nil {
-		return cloneStrings(specEnv)
-	}
-	return env
-}
-
-func sandboxEnvironmentForCommandChecked(specEnv []string, policy Policy, backend BackendName, workspaceRoot string) ([]string, error) {
+func sandboxEnvironmentForCommandChecked(specEnv []string, policy Policy, backend BackendName, workspaceRoot string, profile PermissionProfile) ([]string, error) {
 	env := cloneStrings(specEnv)
 	if specEnv == nil {
 		// Preserve the caller environment for sandboxed commands. Scrub
@@ -423,7 +435,7 @@ func sandboxEnvironmentForCommandChecked(specEnv []string, policy Policy, backen
 	if runtime.GOOS == "windows" {
 		overrides = append(overrides, "COMSPEC="+envListValue(env, "COMSPEC", "cmd.exe"))
 	}
-	env, err := withSandboxGoCache(env, policy, backend, workspaceRoot)
+	env, err := withSandboxGoCache(env, policy, backend, workspaceRoot, profile)
 	if err != nil {
 		return nil, err
 	}
@@ -447,11 +459,105 @@ func sandboxGoCacheDir(workspaceRoot string) (string, error) {
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return "", fmt.Errorf("create sandbox Go cache directory %q: %w", cacheDir, err)
 	}
+	tempgc.TouchCache(cacheDir)
+	tempgc.MaybeCollectAsync()
 	return cacheDir, nil
 }
 
-func withSandboxGoCache(env []string, policy Policy, backend BackendName, workspaceRoot string) ([]string, error) {
-	if policy.Mode == ModeDisabled || !sandboxGoCacheBackend(backend) || strings.TrimSpace(envListValue(env, "GOCACHE", "")) != "" {
+// sandboxGoCacheWritable reports whether a caller GOCACHE value is a directory
+// the sandbox lets the command write under profile. It uses the profile's
+// write roots and, when AllowTemp is set, the default temp roots. A path under
+// a protected metadata name of a containing root is refused, and so is a path
+// under a DenyWrite entry.
+func sandboxGoCacheWritable(value string, profile PermissionProfile) bool {
+	candidate, ok := resolveSandboxGoCachePath(value)
+	if !ok {
+		return false
+	}
+	fs := profile.FileSystem
+	for _, denied := range fs.DenyWrite {
+		// The profile only resolves DenyWrite entries that exist, so also
+		// resolve the entry the same way as the candidate.
+		if pathWithinRoot(denied, candidate) {
+			return false
+		}
+		if resolved, ok := resolveSandboxGoCachePath(denied); ok && pathWithinRoot(resolved, candidate) {
+			return false
+		}
+	}
+	roots := append([]WritableRoot{}, fs.WriteRoots...)
+	if fs.AllowTemp {
+		for _, tempRoot := range defaultTempWriteRoots() {
+			roots = append(roots, WritableRoot{Root: tempRoot})
+		}
+	}
+	writable := false
+	for _, root := range roots {
+		if !pathWithinRoot(root.Root, candidate) {
+			continue
+		}
+		for _, name := range root.ProtectedMetadataNames {
+			if pathWithinRoot(filepath.Join(root.Root, name), candidate) {
+				return false
+			}
+		}
+		writable = true
+	}
+	return writable
+}
+
+// resolveSandboxGoCachePath returns the real path a GOCACHE value names. It
+// resolves symlinks on the longest existing prefix of the raw value before any
+// cleaning, so "link/../x" follows link first, as the kernel does. Go creates
+// the cache on first use, so the missing tail is kept as is. A ".." in that
+// tail is refused.
+func resolveSandboxGoCachePath(value string) (string, bool) {
+	if !filepath.IsAbs(value) {
+		return "", false
+	}
+	sep := string(filepath.Separator)
+	existing, rest := value, ""
+	for {
+		if _, err := os.Stat(existing); err == nil {
+			break
+		}
+		i := strings.LastIndexAny(existing, "/"+sep)
+		if i < 0 {
+			return "", false
+		}
+		tail := existing[i+1:]
+		if rest == "" {
+			rest = tail
+		} else {
+			rest = tail + sep + rest
+		}
+		next := existing[:i]
+		if next == "" || strings.HasSuffix(next, ":") {
+			next += sep
+		}
+		if next == existing {
+			return "", false
+		}
+		existing = next
+	}
+	for _, part := range strings.FieldsFunc(rest, func(r rune) bool { return r == '/' || r == filepath.Separator }) {
+		if part == ".." {
+			return "", false
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", false
+	}
+	return filepath.Join(resolved, rest), true
+}
+
+func withSandboxGoCache(env []string, policy Policy, backend BackendName, workspaceRoot string, profile PermissionProfile) ([]string, error) {
+	if policy.Mode == ModeDisabled || !sandboxGoCacheBackend(backend) {
+		return env, nil
+	}
+	if preset := strings.TrimSpace(envListValue(env, "GOCACHE", "")); preset == "off" || (preset != "" && sandboxGoCacheWritable(preset, profile)) {
+		// Keep a caller cache only when the sandbox lets the command write it.
 		return env, nil
 	}
 	cacheDir, err := sandboxGoCacheDir(workspaceRoot)

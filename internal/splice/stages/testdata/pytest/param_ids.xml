@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="3" time="0.024" timestamp="2026-11-12T17:38:01.939091-07:00" hostname="Mac.localdomain"><testcase classname="tests.test_param" name="test_param[case one]" time="0.000" /><testcase classname="tests.test_param" name="test_param[x - y]" time="0.000" /><testcase classname="tests.test_param" name="test_param[fails - here]" time="0.000"><failure message="AssertionError: bad - value&#10;assert 'fails - here' != 'fails - here'">value = 'fails - here'
+
+    @pytest.mark.parametrize("value", ["case one", "x - y", "fails - here"])
+    def test_param(value):
+&gt;       assert value != "fails - here", "bad - value"
+E       AssertionError: bad - value
+E       assert 'fails - here' != 'fails - here'
+
+tests/test_param.py:5: AssertionError</failure></testcase></testsuite></testsuites>

@@ -126,6 +126,7 @@ func BuildExecutionPlanWithTopology(topology *schemas.PipelineTopology, request 
 		RemovedStages: removed,
 		Tier:          tier,
 		RequestIntent: intent,
+		Request:       schemas.BoundRequest(request),
 		Stages:        stages,
 		TokenBudget:   compiled.Budget,
 		Flags:         set.EnabledNames(),

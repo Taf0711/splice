@@ -2,6 +2,7 @@ package splice
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -43,6 +44,51 @@ func TestClassifyRequestTierLight(t *testing.T) {
 	out := ClassifyRequestTyped("Refactor helper functions")
 	if out.Tier != schemas.TierLight {
 		t.Fatalf("expected light, got %q", out.Tier)
+	}
+}
+
+func TestClassifierRiskDomainBlocksTrivialTier(t *testing.T) {
+	cases := []struct {
+		name    string
+		request string
+		want    schemas.PipelineTier
+	}{
+		{"rename with auth word", "rename the auth token validation function", schemas.TierSubstantial},
+		{"typo with permission and secret", "fix typo in the permission check for secret keys", schemas.TierLight},
+		{"format with oauth login", "format the oauth login handler", schemas.TierSubstantial},
+		{"rename with auth and architecture keyword", "rename the auth token validation in the multi-provider platform", schemas.TierArchitectural},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ClassifyComplexity(schemas.ComplexityClassifierInput{Request: tc.request})
+			hasRisk := slices.Contains(got.DetectedRiskDomains, schemas.RiskSecurity) ||
+				slices.Contains(got.DetectedRiskDomains, schemas.RiskAuth)
+			if !hasRisk {
+				t.Fatalf("precondition failed for %q: no auth or security risk domain detected (%v)", tc.request, got.DetectedRiskDomains)
+			}
+			if got.Tier != tc.want {
+				t.Fatalf("request %q with risk domains %v classified as %q, want %q; a trivial keyword must not skip verification", tc.request, got.DetectedRiskDomains, got.Tier, tc.want)
+			}
+		})
+	}
+}
+
+func TestClassifierPureTypoStaysTrivial(t *testing.T) {
+	cases := []struct {
+		name    string
+		request string
+	}{
+		{"typo in README", "fix typo in README"},
+		{"rename helper variables", "rename the helper variables in the formatter"},
+		{"spelling in changelog intro", "fix spelling in the changelog intro"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ClassifyComplexity(schemas.ComplexityClassifierInput{Request: tc.request})
+			if got.Tier != schemas.TierTrivial {
+				t.Fatalf("%q classified as %q, want %q (domains %v)", tc.request, got.Tier, schemas.TierTrivial, got.DetectedRiskDomains)
+			}
+		})
 	}
 }
 

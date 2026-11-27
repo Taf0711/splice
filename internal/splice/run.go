@@ -29,6 +29,7 @@ import (
 	"github.com/Taf0711/splice/internal/redaction"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sandbox/procrun"
+	"github.com/Taf0711/splice/internal/secrets"
 	"github.com/Taf0711/splice/internal/splice/cognition"
 	"github.com/Taf0711/splice/internal/splice/learn"
 	"github.com/Taf0711/splice/internal/splice/presentrun"
@@ -74,6 +75,18 @@ func spendSourceForInvocation(invocationOrdinal int) string {
 func (ledger *requestLedger) append(record schemas.PipelineUsageRecord) {
 	record.Sequence = len(ledger.records) + 1
 	ledger.records = append(ledger.records, record)
+}
+
+// DesignUsageRecorder returns the usage hook for one design-phase request. It
+// normalizes and prices the request with the rule a pipeline stage request
+// uses, then calls the run's OnAttributedUsage. It returns nil when the run
+// has no usage hook.
+func DesignUsageRecorder(options agent.Options) func(agent.AttributedUsage) {
+	cfg := PipelineConfigFromAgentOptions(options)
+	if cfg.OnAttributedUsage == nil {
+		return nil
+	}
+	return newRequestLedger().recordingOptions(cfg).OnAttributedUsage
 }
 
 func (ledger *requestLedger) recordingOptions(options PipelineRunConfig) PipelineRunConfig {
@@ -399,6 +412,7 @@ func preflightRunError(err error) error {
 // Run executes one prompt through the pipeline. It brackets the run with the
 // run start and end events on Options.EventSink.
 func Run(ctx context.Context, prompt string, provider agent.Provider, options agent.Options, mem MemoryStore, rec WorkspaceRecovery) (agent.Result, error) {
+	ctx = withUserSandbox(ctx, options.Sandbox)
 	return bracketRun(options, func() (agent.Result, error) {
 		return runPipeline(ctx, prompt, provider, options, mem, rec)
 	})
@@ -408,6 +422,10 @@ func Run(ctx context.Context, prompt string, provider agent.Provider, options ag
 // Run and RunDesignPlanWithResume use it. The redaction options are built here,
 // once per run.
 func bracketRun(options agent.Options, run func() (agent.Result, error)) (agent.Result, error) {
+	// Each run gets its own proposal base registry, so an earlier run's
+	// snapshot never judges this run's writes.
+	defer stages.SetProposalBases(stages.NewProposalBaseRegistry())()
+	defer stages.SetHostWrites(stages.NewHostWriteLedger())()
 	secrets := append([]string(nil), options.SecretValues...)
 	emitSink(options.EventSink, secrets, agent.StageEvent{Kind: "run", Status: "running"})
 	result, err := run()
@@ -568,6 +586,8 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	if _, err := ResolveExpansionRounds(); err != nil {
 		return schemas.PipelineResult{}, err
 	}
+	// Carried context lives for this run only.
+	options.carriedPaths = newCarriedContextPaths()
 	workDir := options.Cwd
 	if workDir == "" {
 		workDir = "."
@@ -575,6 +595,14 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		return schemas.PipelineResult{}, fmt.Errorf("resolve work dir: %w", err)
+	}
+	// The pre-run state is captured before any pass changes the workspace.
+	// It tells a failure the run caused from one that was already there.
+	if hasTestRunnerStage(plan) {
+		options.testBaseline = captureTestBaseline(ctx, absWorkDir, func(msg string) {
+			emitProgress(options, msg+"\n")
+		})
+		defer options.testBaseline.Release(ctx)
 	}
 
 	// Memory identity is the stable repo root (options.ProjectRoot for worktree
@@ -747,6 +775,9 @@ func runExecutionPlan(ctx context.Context, runID string, plan schemas.ExecutionP
 
 	result, err := runIterationLoop(ctx, runID, plan, registry, provider, ledgerOpts, absWorkDir, runner, mem, rec, tr, acc, ledger)
 	if err == nil {
+		// The run result says when stage commands ran under an outer sandbox
+		// the user accepted, in every status.
+		result.NestedSandboxAccepted = options.nestedSandboxAccepted()
 		finishPresentation(acc, options, result)
 	}
 	if err != nil {
@@ -874,8 +905,14 @@ func pipelineTestCommand(result schemas.PipelineResult, testStage string) string
 
 // testCommandFromOutput returns the expanded argv recorded by test_runner.
 // The stage output is the source of truth because detection and configured
-// placeholders are resolved before the command runs.
+// placeholders are resolved before the command runs. The value goes into the
+// run record, so any secret in it is redacted.
 func testCommandFromOutput(output schemas.HarnessStageOutput) string {
+	command, _ := secrets.Redact(rawTestCommand(output))
+	return command
+}
+
+func rawTestCommand(output schemas.HarnessStageOutput) string {
 	raw, ok := output.Data["test_command"]
 	if !ok {
 		return ""
@@ -928,7 +965,9 @@ func captureVerificationFromResult(result schemas.PipelineResult, testStage stri
 		break
 	}
 	if state := result.FinalState; state != nil {
-		ver.TestsExecuted = state.TestsPassing + state.TestsFailing + state.TestsErrored
+		// Tests that failed before the run ran too, so they count as executed.
+		// They are not failed for this run.
+		ver.TestsExecuted = state.TestsPassing + state.TestsFailing + state.TestsErrored + state.TestsAlreadyFailing
 		ver.TestsFailed = state.TestsFailing + state.TestsErrored
 		ver.AcceptanceTotal = state.AcceptanceFactsPassing + state.AcceptanceFactsFailing
 		ver.AcceptancePassed = state.AcceptanceFactsPassing
@@ -936,6 +975,9 @@ func captureVerificationFromResult(result schemas.PipelineResult, testStage stri
 	if ver.TestStageRan {
 		ver.EnvironmentStdLib = true
 		ver.ObservedResult = fmt.Sprintf("executed %d test(s), %d failed", ver.TestsExecuted, ver.TestsFailed)
+		if state := result.FinalState; state != nil && state.TestsAlreadyFailing > 0 {
+			ver.ObservedResult += fmt.Sprintf(", %d already failing before the run", state.TestsAlreadyFailing)
+		}
 	}
 	return ver
 }
@@ -1043,18 +1085,27 @@ func emitAgentNodeNotices(options PipelineRunConfig, topology *schemas.PipelineT
 }
 
 // preflightAgentNodeSandbox refuses a run whose topology has an agent node
-// when the run sandbox does not enforce. The run stops before the first
-// provider request, with the error the node itself would return.
+// when the run sandbox does not enforce, or a command node when the stage
+// sandbox does not enforce. The run stops before the first provider request,
+// with the error the node itself would return.
 func preflightAgentNodeSandbox(options PipelineRunConfig, topology *schemas.PipelineTopology) error {
 	if topology == nil {
 		return nil
 	}
 	for _, node := range topology.Nodes {
-		if node.Type != schemas.NodeTypeAgent {
-			continue
-		}
-		if err := agentNodeSandboxError(options.Sandbox); err != nil {
-			return fmt.Errorf("agent node %s: %w", node.Name, err)
+		switch node.Type {
+		case schemas.NodeTypeAgent:
+			if err := agentNodeSandboxError(options.Sandbox, options.AcceptNestedSandbox); err != nil {
+				return fmt.Errorf("agent node %s: %w", node.Name, err)
+			}
+		case schemas.NodeTypeCommand:
+			// A command node runs under the stage sandbox, which is derived
+			// from the run sandbox (buildStageToolRunner). Only its backend
+			// or a nested sandbox can leave a gap: the stage policy always
+			// enforces. The user can accept the nested gap alone.
+			if gap := runSandboxGap(procrun.NewStageEngineFrom(options.Sandbox, options.Cwd), options.AcceptNestedSandbox); gap != "" {
+				return fmt.Errorf("command node %s: stage sandbox is not enforcing: %s; a command node never runs unsandboxed", node.Name, gap)
+			}
 		}
 	}
 	return nil
@@ -1191,6 +1242,51 @@ func runIterationLoop(
 	// for this run. Escalation fires at most once (AR10c).
 	escalated := false
 
+	// tryEscalate switches the run to the escalation model. It sets escalated,
+	// so escalation fires at most once per run. It returns true only when a
+	// model switch was applied. Without a resolver it returns false, and the
+	// caller decides what to report.
+	tryEscalate := func(iteration int) (switched bool) {
+		escalated = true // do not retry: escalation fires at most once per run
+		if options.EscalationModelResolver == nil {
+			return false
+		}
+		escalation, escErr := options.EscalationModelResolver()
+		if escErr != nil {
+			emitNotice(options, fmt.Sprintf("[escalation] resolver error: %v (continuing without escalation)", escErr))
+			return false
+		}
+		if escalation.Provider == nil {
+			emitProgress(options, "[escalation] no escalation provider configured (continuing without escalation)\n")
+			return false
+		}
+		provider = escalation.Provider
+		options.ProviderName = escalation.ProviderName
+		options.Model = escalation.Model
+		// An escalation config without its own effort keeps the
+		// run's; either way it is fitted to the escalated model.
+		if escalation.ReasoningEffort != "" {
+			options.ReasoningEffort = escalation.ReasoningEffort
+		}
+		options.ReasoningEffort = string(options.ModelRegistry.RequestEffort(options.Model, modelregistry.ReasoningEffort(options.ReasoningEffort)))
+		// Escalation applies to every later LLM-backed stage. Do not let
+		// the original stage router replace it on the next iteration.
+		options.StageModelResolver = nil
+		options.escalatedModel = escalation.Model
+		// Escalation also overrides node model pins. The node
+		// resolver is superseded so every later call takes the
+		// escalated model, and the switch names the pins it replaced.
+		msg := fmt.Sprintf("[escalation] switched to model %s for iteration %d", escalation.Model, iteration+1)
+		if pinned := pinnedNodeNames(plan); len(pinned) > 0 {
+			options.NodeModelResolver = func(string, agent.ModelOverride) (agent.ModelSelection, error) {
+				return escalation, nil
+			}
+			msg += fmt.Sprintf("; overrides the model pin of node(s) %s", strings.Join(pinned, ", "))
+		}
+		emitProgress(options, msg+"\n")
+		return true
+	}
+
 	// MaxTurns applies to agent.Run, not deterministic pipeline passes.
 	maxIterations := defaultMaxIterations
 	if options.Advisor == nil || options.Advisor.Mode() == AdvisorModeOff {
@@ -1232,6 +1328,32 @@ func runIterationLoop(
 	usePass := options.Flags.Enabled(flags.PassEvidence)
 	// prevPassStep is the previous failed pass, for the pass-boundary judgment.
 	var prevPassStep *TrajectoryStep
+	// prevAcceptanceSig is the acceptance failure signature of the previous
+	// completed pass, and prevAcceptanceIter is that pass's iteration.
+	var prevAcceptanceSig string
+	var prevAcceptanceIter int
+	// accRepeat counts the consecutive completed passes with the same
+	// non-empty acceptance signature. accFirstIter is the first iteration
+	// of that run.
+	var accRepeat, accFirstIter int
+	// recordEscalatedPass records the acceptance signature and the billed cost
+	// of pass i, as the normal continue path does, so the escalated pass starts
+	// from the same state. accRepeat restarts at 0 for the escalated model. It
+	// returns the failure reason when the run must end, or "" otherwise.
+	recordEscalatedPass := func(i int, outputs []schemas.HarnessStageOutput) string {
+		accKeys, err := acceptanceFailureSignatures(outputs)
+		if err != nil {
+			return fmt.Sprintf("acceptance signature: %v", err)
+		}
+		prevAcceptanceSig, prevAcceptanceIter = strings.Join(accKeys, "\n"), i
+		accRepeat, accFirstIter = 0, i
+		snap, err := ledgerCostSnapshot(ledger)
+		if err != nil {
+			return err.Error()
+		}
+		prevCost = snap
+		return ""
+	}
 	for i := 1; i <= maxIterations; i++ {
 		if ctx.Err() != nil {
 			return schemas.PipelineResult{}, context.Canceled
@@ -1262,6 +1384,7 @@ func runIterationLoop(
 			return finishWithReason(runID, plan, allRecords, "failed", err.Error())
 		}
 		allRecords = append(allRecords, passRecords...)
+		options.runChanged = runChangedByStage(options.runChanged, passOutputs)
 
 		// Measure this pass against the end of the previous pass, whatever the
 		// flag says. The HEAD summary is read once and shared by both branches.
@@ -1291,6 +1414,18 @@ func runIterationLoop(
 
 		var failedBoundaryDecision *schemas.TrajectoryDecision
 		if !completed {
+			// Rule-mode backstop: an active classifier owns this decision.
+			// A stalled repair ends the run. Another pass repeats the failure.
+			if options.ClassifierPolicy == nil && passRepairStalled(passRecords) {
+				stopReason := fmt.Sprintf(repairStallReason, i)
+				if !escalated && tryEscalate(i) {
+					rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, "Recovery: escalation after repair stall: "+stopReason)
+					revisionContext = &rc
+					priorFailure = ""
+					continue
+				}
+				return finishWithReason(runID, plan, allRecords, "aborted", stopReason)
+			}
 			failed := findFailed(passRecords)
 			if options.ClassifierPolicy != nil {
 				latestPass := TrajectoryStep{Change: passChange(passRecords, roleStageName(plan, "code_writer")), Failure: passFailure(passRecords, passOutputs), FailureKind: passFailureKind(passRecords, passOutputs)}
@@ -1416,6 +1551,63 @@ func runIterationLoop(
 			}
 			return finishCompleted(runID, plan, allRecords, state, passRecords, passOutputs)
 		}
+		// Rule-mode backstop: an active classifier owns this decision.
+		// The pass did not succeed. A stalled repair ends the run here too.
+		if options.ClassifierPolicy == nil && passRepairStalled(passRecords) {
+			stopReason := fmt.Sprintf(repairStallReason, i)
+			if !escalated && tryEscalate(i) {
+				if reason := recordEscalatedPass(i, passOutputs); reason != "" {
+					return finishWithReason(runID, plan, allRecords, "failed", reason)
+				}
+				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, "Recovery: escalation after repair stall: "+stopReason)
+				revisionContext = &rc
+				continue
+			}
+			return finishWithReason(runID, plan, allRecords, "aborted", stopReason)
+		}
+		// Rule-mode backstop: an active classifier owns this decision.
+		// The same acceptance checks failed again. The run stops at once when
+		// the pass changed no files. It also stops at the repeat limit when
+		// the files changed.
+		accKeys, accErr := acceptanceFailureSignatures(passOutputs)
+		if accErr != nil {
+			return finishWithReason(runID, plan, allRecords, "failed", fmt.Sprintf("acceptance signature: %v", accErr))
+		}
+		accSig := strings.Join(accKeys, "\n")
+		switch {
+		case accSig == "":
+			accRepeat, accFirstIter = 0, 0
+		case accSig == prevAcceptanceSig:
+			accRepeat++
+		default:
+			accRepeat, accFirstIter = 1, i
+		}
+		if options.ClassifierPolicy == nil && accRepeat >= 2 &&
+			state.PassChanged != nil && !*state.PassChanged {
+			stopReason := fmt.Sprintf(acceptanceStallReason, prevAcceptanceIter, i, acceptanceFirstStatement(accKeys[0]))
+			if !escalated && tryEscalate(i) {
+				if reason := recordEscalatedPass(i, passOutputs); reason != "" {
+					return finishWithReason(runID, plan, allRecords, "failed", reason)
+				}
+				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, "Recovery: escalation after acceptance stall: "+stopReason)
+				revisionContext = &rc
+				continue
+			}
+			return finishWithReason(runID, plan, allRecords, "aborted", stopReason)
+		}
+		if options.ClassifierPolicy == nil && accRepeat >= acceptanceRepeatLimit {
+			stopReason := fmt.Sprintf(acceptanceRepeatReason, accFirstIter, i, acceptanceFirstStatement(accKeys[0]))
+			if !escalated && tryEscalate(i) {
+				if reason := recordEscalatedPass(i, passOutputs); reason != "" {
+					return finishWithReason(runID, plan, allRecords, "failed", reason)
+				}
+				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, "Recovery: escalation after acceptance repeat: "+stopReason)
+				revisionContext = &rc
+				continue
+			}
+			return finishWithReason(runID, plan, allRecords, "aborted", stopReason)
+		}
+		prevAcceptanceSig, prevAcceptanceIter = accSig, i
 
 		// W3: the cost rule reads BILLED cost from the authoritative request
 		// ledger, never raw tokens, because a cache-read round costs a
@@ -1525,7 +1717,7 @@ func runIterationLoop(
 			if options.ClassifierPolicy != nil {
 				options.ClassifierPolicy.stepBackUsed = true
 			}
-			report := buildStepBackReport(plan.RequestIntent, history, passOutputs, decision)
+			report := buildStepBackReport(plan.TaskText(), history, passOutputs, decision)
 			sbSelection := agent.ModelSelection{
 				Provider:        provider,
 				ProviderName:    options.ProviderName,
@@ -1574,41 +1766,7 @@ func runIterationLoop(
 		}
 		if decision.Action == schemas.ActionEscalateCycleDetected || decision.Action == schemas.ActionEscalateOscillation {
 			if !escalated {
-				if options.EscalationModelResolver != nil {
-					escalated = true // do not retry: escalation fires at most once per run
-					escalation, escErr := options.EscalationModelResolver()
-					if escErr != nil {
-						emitNotice(options, fmt.Sprintf("[escalation] resolver error: %v (continuing without escalation)", escErr))
-					} else if escalation.Provider == nil {
-						emitProgress(options, "[escalation] no escalation provider configured (continuing without escalation)\n")
-					} else {
-						provider = escalation.Provider
-						options.ProviderName = escalation.ProviderName
-						options.Model = escalation.Model
-						// An escalation config without its own effort keeps the
-						// run's; either way it is fitted to the escalated model.
-						if escalation.ReasoningEffort != "" {
-							options.ReasoningEffort = escalation.ReasoningEffort
-						}
-						options.ReasoningEffort = string(options.ModelRegistry.RequestEffort(options.Model, modelregistry.ReasoningEffort(options.ReasoningEffort)))
-						// Escalation applies to every later LLM-backed stage. Do not let
-						// the original stage router replace it on the next iteration.
-						options.StageModelResolver = nil
-						options.escalatedModel = escalation.Model
-						// Escalation also overrides node model pins. The node
-						// resolver is superseded so every later call takes the
-						// escalated model, and the switch names the pins it replaced.
-						msg := fmt.Sprintf("[escalation] switched to model %s for iteration %d", escalation.Model, i+1)
-						if pinned := pinnedNodeNames(plan); len(pinned) > 0 {
-							options.NodeModelResolver = func(string, agent.ModelOverride) (agent.ModelSelection, error) {
-								return escalation, nil
-							}
-							msg += fmt.Sprintf("; overrides the model pin of node(s) %s", strings.Join(pinned, ", "))
-						}
-						emitProgress(options, msg+"\n")
-					}
-				} else {
-					escalated = true
+				if !tryEscalate(i) && options.EscalationModelResolver == nil {
 					emitProgress(options, "[escalation] no EscalationModelResolver configured (continuing without escalation)\n")
 				}
 			}
@@ -1663,6 +1821,36 @@ func runIterationLoop(
 	return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf("reached max iterations (%d) without success", maxIterations))
 }
 
+// repairStallReason is the abort reason when a pass ends with a stalled repair.
+// It takes the iteration number.
+const repairStallReason = "repair_no_progress: the repair loop could not change the failing tests in iteration %d; no new pass started"
+
+// acceptanceStallReason is the abort reason when the same acceptance checks
+// fail in two passes and the workspace does not change. It takes the previous
+// iteration, the current iteration, and the first failing statement.
+const acceptanceStallReason = "acceptance_no_progress: the same acceptance checks failed in iterations %d and %d and the pass changed no files; no new pass started: %s"
+
+// acceptanceRepeatLimit is the number of consecutive passes with the same
+// acceptance failures that ends the run, even when the files changed.
+const acceptanceRepeatLimit = 3
+
+// acceptanceRepeatReason is the abort reason when the same acceptance checks
+// fail in acceptanceRepeatLimit consecutive passes, although the files
+// changed. It takes the first iteration of the run, the current iteration,
+// and the first failing statement.
+const acceptanceRepeatReason = "acceptance_no_progress: the same acceptance checks failed in iterations %d to %d although the code changed; no new pass started: %s"
+
+// passRepairStalled reports whether a pass's repair loop stopped with
+// repair_no_progress. The pass loop then ends the run.
+func passRepairStalled(records []schemas.StageRecord) bool {
+	for _, r := range records {
+		if r.RepairNoProgress {
+			return true
+		}
+	}
+	return false
+}
+
 func runPass(
 	ctx context.Context,
 	runID string,
@@ -1679,6 +1867,9 @@ func runPass(
 	tr *runTraceAccumulator,
 	execBudget *StageExecutionBudget,
 ) ([]schemas.StageRecord, []schemas.HarnessStageOutput, bool, error) {
+	// Each pass starts with an empty base registry: a view delivered in an
+	// earlier pass never judges this pass's proposals.
+	defer stages.SetProposalBases(stages.NewProposalBaseRegistry())()
 	priorSummaries := map[string]string{}
 	priorChangedFiles := map[string][]string{}
 	summariesByStage := map[string]string{}
@@ -1750,6 +1941,7 @@ func runPass(
 			Sequence:          seq + 1,
 			PlanTier:          plan.Tier,
 			RequestIntent:     plan.RequestIntent,
+			Request:           taskRequestFor(agentStage, plan),
 			AcceptanceFacts:   append([]schemas.AcceptanceFact(nil), plan.AcceptanceFacts...),
 			PriorSummaries:    withRoleAlias(prior, plan, "code_writer"),
 			PriorChangedFiles: withRoleAlias(priorChanged, plan, "code_writer"),
@@ -1757,6 +1949,10 @@ func runPass(
 			RevisionContext:   revisionContext,
 			PipelineStages:    stageNames,
 			NextStage:         nextStage,
+		}
+
+		if stageRole(stage) == "test_runner" {
+			input.RunChangedFiles = runChangedByStage(options.runChanged, outputs)
 		}
 
 		caps := effectiveCaps(stage, agentStage.Capabilities())
@@ -1863,7 +2059,9 @@ func runPass(
 		// same instance, so pass + repairs of one stage share one allowance,
 		// while different stages never starve each other.
 		stageBudget := NewStageExecutionBudget(0)
-		output, err := runStageWithContextBudgeted(stageCtx, input, agentStage, iteration, selection, options, workDir, runner, mem, caps, stage.Budget.OutputMax, tr, priorScope, 0, stageBudget)
+		evidence := newSandboxEvidenceCollector(stageName, iteration)
+		evidence.nestedAccepted = options.nestedSandboxAccepted()
+		output, err := runStageWithContextBudgeted(withSandboxEvidence(stageCtx, evidence), input, agentStage, iteration, selection, options, workDir, runner, mem, caps, stage.Budget.OutputMax, tr, priorScope, 0, stageBudget)
 		if cancelStage != nil {
 			cancelStage()
 		}
@@ -1884,6 +2082,7 @@ func runPass(
 			Iteration: iteration,
 			LatencyMs: latencyMs,
 		}
+		evidence.attach(&record)
 		if !modelFree {
 			if selection.Model != "" {
 				record.Model = Ptr(selection.Model)
@@ -1965,6 +2164,13 @@ func runPass(
 		} else {
 			emitStageEvent(options, iteration-1, stageName, "completed", summary, 100, stageChangedFiles(output))
 		}
+		// The run log shows the summary only. The verifier also lists each
+		// failed check, so the log names the checks that failed.
+		if stageName == roleStageName(plan, "acceptance_verifier") {
+			if at := strings.Index(output.Detail, "\n- "); at >= 0 {
+				emitStageEvent(options, iteration-1, stageName, "message", output.Detail[at+1:], 0, nil)
+			}
+		}
 		for _, obs := range extractWriteObservations(stageName, roleStageName(plan, "test_runner"), runID, memoryProjectRoot(options, workDir), output) {
 			persistObservation(ctx, mem, obs, func(msg string) {
 				emitProgress(options, fmt.Sprintf("[%s] %s", stageName, msg))
@@ -1975,6 +2181,7 @@ func runPass(
 		priorChangedFiles[stageName] = append([]string(nil), changedFiles...)
 		summariesByStage[stageName] = *record.OutputSummary
 		changedByStage[stageName] = append([]string(nil), changedFiles...)
+		output.Stage = stageName
 		outputsByStage[stageName] = output
 		outputs = append(outputs, output)
 
@@ -1987,9 +2194,21 @@ func runPass(
 				if _, hasWriter := priorSummaries[roleStageName(plan, "code_writer")]; hasWriter {
 					if _, interaction, rerr := attemptLocalRepair(ctx, runID, iteration, plan, registry, provider, options, workDir, runner, mem, tr, priorScope, wallDeadline, execBudget, &records, &outputs, &priorSummaries, &priorChangedFiles, output); rerr != nil {
 						return records, outputs, false, rerr
-					} else if interaction != nil && tr != nil {
-						tr.recordInteraction(*interaction)
-						tr.persistPartial(ctx)
+					} else if interaction != nil {
+						// The interaction is not a pass record. Copy its stall
+						// flag onto this iteration's test_runner record so the
+						// pass loop sees it in passRecords.
+						if interaction.RepairNoProgress {
+							for k := range records {
+								if records[k].Name == roleStageName(plan, "test_runner") && records[k].Iteration == iteration {
+									records[k].RepairNoProgress = true
+								}
+							}
+						}
+						if tr != nil {
+							tr.recordInteraction(*interaction)
+							tr.persistPartial(ctx)
+						}
 					}
 				}
 			}
@@ -2080,7 +2299,25 @@ func runStageWithContextBudgeted(
 	priorScope *StageScopePlan,
 	invocationOrdinal int,
 	execBudget *StageExecutionBudget,
-) (schemas.HarnessStageOutput, error) {
+) (_ schemas.HarnessStageOutput, err error) {
+	// E01b: an invocation that ends without a submission hands the files it
+	// fetched to the next invocation of this stage in the run.
+	var fetched []schemas.ContextQuery
+	defer func() {
+		if err != nil {
+			options.carriedPaths.put(input.StageName, workDir, fetched)
+			return
+		}
+		options.carriedPaths.clear(input.StageName)
+	}()
+	// A model-free stage runs repository code (tests, scanners, acceptance,
+	// command nodes): its tool calls use the stage runner and the stage
+	// sandbox. The stage implementation decides, not the topology caps.
+	// This is the one place the runner is chosen, so the stage options and
+	// the cognition-scoped wrapper below both get it.
+	if stage.Capabilities().ModelFree && options.stageToolRunner != nil {
+		runner = options.stageToolRunner
+	}
 	// F1: the orchestrator owns the classification cell for this invocation.
 	// The stage's usage closure reads it at emission time, so reclassification
 	// between expansion rounds re-labels the spend source without threading
@@ -2103,6 +2340,7 @@ func runStageWithContextBudgeted(
 		}
 	}
 	stageOpts := withVerifyCommand(stageOptions(input.StageName, iteration, selection, stageRunOptions, workDir, runner, caps, invocationAttribution), stage, options, workDir)
+	stageOpts.CarriedQueries = options.carriedPaths.get(input.StageName, workDir)
 	// Part A context bridge: fresh cognition narrows the default context
 	// request. The scoped request replaces the default ONLY when the scope
 	// resolved a question; otherwise the cold path stays byte-identical.
@@ -2187,7 +2425,7 @@ func runStageWithContextBudgeted(
 			for _, f := range priorScope.MemoryPrefetch {
 				paths = append(paths, f.Path)
 			}
-			req = stages.DefaultContextRequestPreferring(input.RequestIntent, revisionEvidence, workDir, detectLanguage(workDir), paths)
+			req = stages.DefaultContextRequestPreferring(input.TaskText(), revisionEvidence, workDir, detectLanguage(workDir), paths)
 			req.Reason = "Memory-assisted dependency prefetch: retained verified work names these sources; the host fetched their current views before your first request. " + req.Reason
 		}
 		have := map[string]bool{}
@@ -2232,7 +2470,7 @@ func runStageWithContextBudgeted(
 	if priorScope != nil && len(priorScope.JevPrefetch) > 0 {
 		jevQueries := ContextQueriesFor(priorScope.JevPrefetch)
 		if stageOpts.OverrideContextRequest == nil {
-			req := stages.DefaultContextRequestFor(input.RequestIntent, revisionEvidence, workDir, detectLanguage(workDir))
+			req := stages.DefaultContextRequestFor(input.TaskText(), revisionEvidence, workDir, detectLanguage(workDir))
 			req.Reason = "Decision-approved dependency prefetch: the calibrated selector resolved this dependency; the host fetched the exact declarations before your first request."
 			stageOpts.OverrideContextRequest = &req
 		}
@@ -2273,6 +2511,10 @@ func runStageWithContextBudgeted(
 			}
 			emitProgress(options, fmt.Sprintf("[%s] decision prefetch: fetching %d selector-approved view(s) before the first model request", input.StageName, added))
 		}
+	}
+	if stageOpts.OverrideContextRequest != nil && len(stageOpts.CarriedQueries) > 0 {
+		req := withCarriedReads(*stageOpts.OverrideContextRequest, stageOpts.CarriedQueries)
+		stageOpts.OverrideContextRequest = &req
 	}
 	if stageOpts.OverrideContextRequest != nil {
 		if dropped := stageOpts.OverrideContextRequest.FitAggregate(); dropped > 0 {
@@ -2320,6 +2562,9 @@ func runStageWithContextBudgeted(
 			}
 		}
 		requestsBefore := providerRequests
+		// E01a: when no later context request can be granted, this call is the
+		// last one that can submit.
+		stageOpts.FinalContextCall = finalContextCall(budget)
 		output, err := stage.Run(ctx, input, selection.Provider, stageOpts)
 		if err != nil {
 			return schemas.HarnessStageOutput{}, withStageUsage(err, usageTotal)
@@ -2357,6 +2602,11 @@ func runStageWithContextBudgeted(
 			return schemas.HarnessStageOutput{}, withStageUsage(eerr, usageTotal)
 		}
 		input = expanded
+		// Round 0 is the seed the stage starts from, not a read the model
+		// asked for, so only expansion rounds are carried.
+		if round > 0 {
+			fetched = append(fetched, requestedQueries(output.ContextRequest)...)
+		}
 		// The stage re-runs on the next loop iteration with the new
 		// evidence; the historical "requested context more than once"
 		// error becomes a bounded continuation instead.
@@ -2386,11 +2636,10 @@ func expandContextRound(
 	if !budget.SpendRequest() {
 		return input, fmt.Errorf("%w: %d provider request(s) spent", errExpansionBudgetExhausted, budget.RequestsUsed())
 	}
-	if ledger != nil {
-		if err := ledger.Check(*request); err != nil {
-			return input, fmt.Errorf("expansion rejected: %w", err)
-		}
-	}
+	// F3: a repeated query is not an error. Its content is fulfilled again, and
+	// the no-new-bytes check below appends the note that the content is
+	// already delivered. The shared budget still bounds the loop, so a repeat
+	// that delivers nothing new ends predictably.
 	// Every request is fitted to the aggregate bound here, where they all
 	// pass. (Chain pilot 2: the test generator's post-write reads of many
 	// changed files asked for 72000 characters and failed the stage in
@@ -2402,9 +2651,6 @@ func expandContextRound(
 	if err != nil {
 		return input, fmt.Errorf("fulfill context: %w", err)
 	}
-	if ledger != nil {
-		ledger.Record(*request)
-	}
 	// No-new-bytes detection: an expansion whose every source item repeats
 	// already-delivered content carries the authoritative note that the
 	// context is complete. Without it a model that confabulates elided
@@ -2412,8 +2658,7 @@ func expandContextRound(
 	// M6 campaign evidence), and the stage dies at the budget wall with
 	// zero code written.
 	if ledger != nil && input.Context != nil && len(input.Context.Items) > 0 && !ledger.NewBytes(&bundle) {
-		bundle.HostNotes = append(bundle.HostNotes,
-			"This expansion delivered no new content: every requested file was already delivered above in its complete current form, byte for byte. The delivered views are not truncated and contain no elided ranges. Do not request these files again; proceed with the task using the delivered evidence.")
+		bundle.HostNotes = append(bundle.HostNotes, noNewBytesNote(&bundle))
 	}
 	if ledger != nil {
 		ledger.RecordDigests(&bundle)
@@ -2613,6 +2858,21 @@ func failureCauseClass(summary string) string {
 	default:
 		return "unknown"
 	}
+}
+
+// runChangedByStage returns prior with the paths that outputs changed added to
+// it. Each output is keyed by its stage. The result is a new map.
+func runChangedByStage(prior map[string][]string, outputs []schemas.HarnessStageOutput) map[string][]string {
+	out := cloneChangedFiles(prior)
+	if out == nil {
+		out = map[string][]string{}
+	}
+	for _, output := range outputs {
+		if files := stageChangedFiles(output); len(files) > 0 {
+			out[output.Stage] = append(out[output.Stage], files...)
+		}
+	}
+	return out
 }
 
 func cloneChangedFiles(input map[string][]string) map[string][]string {
@@ -2844,18 +3104,35 @@ func gitChangeSummary(ctx context.Context, workDir string) (schemas.ChangeSummar
 	}, nil
 }
 
+// userSandboxKey is the context key of the user's sandbox engine.
+type userSandboxKey struct{}
+
+// withUserSandbox returns ctx carrying the user's sandbox engine. Splice's own
+// git reads derive their stage engine from it, so the user's denials apply.
+func withUserSandbox(ctx context.Context, engine *sandbox.Engine) context.Context {
+	return context.WithValue(ctx, userSandboxKey{}, engine)
+}
+
+// userSandboxFrom returns the user's sandbox engine carried by ctx. It is nil
+// when ctx has none, and a nil engine gives the fresh stage policy.
+func userSandboxFrom(ctx context.Context) *sandbox.Engine {
+	engine, _ := ctx.Value(userSandboxKey{}).(*sandbox.Engine)
+	return engine
+}
+
 // prepareGitRead builds one of Splice's own read-only git commands under the
 // stage sandbox profile. A repository clean or smudge filter runs inside it,
 // because git-lfs and similar filters must keep working. The filter gets a
 // private temp directory per call: TMPDIR, TMP, and TEMP name it, and it is
 // the only temp directory the sandbox lets the command write. done ends the
-// plan and removes the directory.
+// plan and removes the directory. The stage engine keeps the user's deny
+// entries carried on ctx (see withUserSandbox).
 func prepareGitRead(ctx context.Context, workDir string, args ...string) (*exec.Cmd, func(), error) {
 	tempRoot, err := os.MkdirTemp("", "splice-git-")
 	if err != nil {
 		return nil, nil, fmt.Errorf("make the git temp directory: %w", err)
 	}
-	engine := procrun.NewStageEngineWithTempRoot(workDir, tempRoot)
+	engine := userSandboxFrom(ctx).StageEngine(workDir, tempRoot)
 	cmd, plan, err := stages.PrepareStageCommand(ctx, engine, workDir, append([]string{"git", "-C", workDir}, args...))
 	if err != nil {
 		_ = os.RemoveAll(tempRoot)
@@ -3114,8 +3391,10 @@ func finishPresentation(acc *presentrun.Accumulator, options PipelineRunConfig, 
 	}
 	if status == "completed" && !result.Verified {
 		// A completed run that verified nothing keeps its status and projects
-		// the NOT VERIFIED receipt, with the reason as its detail.
-		acc.Apply(presentrun.AdaptRunOutcomeEvent(status, result.UnverifiedReason, true))
+		// the NOT VERIFIED receipt, with the reason as its detail. A test
+		// command that passed with no per-test evidence has its own receipt.
+		acc.Apply(presentrun.AdaptRunOutcomeEvent(status, result.UnverifiedReason, true,
+			result.VerificationOutcome == schemas.VerificationOutcomeCommandPassed, result.VerificationChecks))
 		options.OnPresentationState(acc.Snapshot())
 		return
 	}
@@ -3129,11 +3408,15 @@ func finishPresentation(acc *presentrun.Accumulator, options PipelineRunConfig, 
 // newAgentToolRunner captures options by value.
 func buildStageToolRunner(options PipelineRunConfig, absWorkDir string) (PipelineRunConfig, ToolRunner) {
 	// Deterministic stage subprocesses run under their own enforce-mode
-	// engine: workspace-scoped filesystem, network denied. This is separate
-	// from options.Sandbox, which keeps the interactive user policy for
-	// model-driven tool calls. Set BEFORE the tool runner is built so the
-	// runner's captured config carries it.
-	options.StageSandbox = procrun.NewStageEngine(absWorkDir)
+	// engine, derived from the user policy: the user's denials stay,
+	// network is denied, writes are workspace-scoped, and no widening
+	// carries over. options.Sandbox keeps the interactive user policy for
+	// model-driven tool calls. Set BEFORE the tool runners are built so the
+	// runners' captured config carries it.
+	options.StageSandbox = procrun.NewStageEngineFrom(options.Sandbox, absWorkDir)
+	// Hooks in a pipeline run execute under the stage engine,
+	// except a user hook marked runOnHost.
+	options.Hooks = options.Hooks.ForPipeline(options.StageSandbox, absWorkDir)
 
 	// Strict read-before-write for every write_file/edit_file in this run: a
 	// model that skips the read now gets a loud, repairable error instead of
@@ -3141,7 +3424,43 @@ func buildStageToolRunner(options PipelineRunConfig, absWorkDir string) (Pipelin
 	// so the runner's captured config carries it.
 	options.StageRequireReadBeforeWrite = true
 
+	options.stageToolRunner = newStageToolRunner(options, absWorkDir)
 	return options, newAgentToolRunner(options, absWorkDir)
+}
+
+// newStageToolRunner builds the tool runner of the model-free stages. It is
+// the agent tool runner (permission flow, hooks, events) whose registry
+// calls run under StageSandbox, so every registry tool call of a stage that
+// runs repository code carries the stage engine. The user engine still
+// decides whether a call asks for approval, so a stage command prompts
+// exactly when it prompted before. A call never runs when the stage engine
+// does not enforce, and a call never asks for more than the stage policy
+// (sandbox_permissions, additional_permissions).
+func newStageToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
+	stageOptions := options
+	stageOptions.toolRunSandbox = options.StageSandbox
+	inner := newAgentToolRunner(stageOptions, cwd)
+	return ToolRunnerFunc(func(ctx context.Context, name string, args map[string]any) (ToolResult, error) {
+		refusal := ""
+		category := schemas.SandboxRefusalEscalation
+		if gap := runSandboxGap(options.StageSandbox, options.AcceptNestedSandbox); gap != "" {
+			refusal = "stage sandbox is not enforcing: " + gap + "; a stage command never runs unsandboxed"
+			category = schemas.SandboxRefusalNoEnforcingSandbox
+		} else if _, ok := args["sandbox_permissions"]; ok {
+			refusal = "stage tool call refused: sandbox_permissions is not allowed for a stage command"
+		} else if _, ok := args["additional_permissions"]; ok {
+			refusal = "stage tool call refused: additional_permissions is not allowed for a stage command"
+		}
+		if refusal == "" {
+			return inner.RunTool(ctx, name, args)
+		}
+		sandboxEvidenceFrom(ctx).refuseToolCall(options.Registry, name, args, options.StageSandbox, category)
+		call := toolCallFor(name, args)
+		emitToolCall(options, call)
+		res := ToolResult{OK: false, Output: refusal, Meta: map[string]string{}, Status: tools.StatusError}
+		emitToolResult(options, call, res)
+		return res, nil
+	})
 }
 
 // newAgentToolRunner builds the agent tool runner for a pipeline run. It
@@ -3167,6 +3486,7 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 		call := toolCallFor(name, args)
 		emitToolCall(options, call)
 		if denied, blocked := agent.DeniedByToolFilters(name, options.EnabledTools, options.DisabledTools); blocked {
+			sandboxEvidenceFrom(ctx).refuseToolCall(options.Registry, name, args, options.runEngine(), schemas.SandboxRefusalPermissionDenied)
 			res := ToolResult{
 				OK:           false,
 				Output:       denied.Output,
@@ -3226,6 +3546,7 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 			switch options.PermissionMode {
 			case agent.PermissionModeAsk:
 				if options.OnPermissionRequest == nil {
+					sandboxEvidenceFrom(ctx).refuseToolCall(options.Registry, name, args, options.runEngine(), schemas.SandboxRefusalPermissionDenied)
 					res := ToolResult{OK: false, Output: "permission request not handled", Meta: map[string]string{}, Status: tools.StatusError}
 					emitToolResult(options, call, res)
 					return res, nil
@@ -3241,6 +3562,7 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 						reason = "permission denied"
 					}
 					emitPermissionDecision(options, request, agent.PermissionDecisionDeny, reason, false)
+					sandboxEvidenceFrom(ctx).refuseToolCall(options.Registry, name, args, options.runEngine(), schemas.SandboxRefusalPermissionDenied)
 					res := ToolResult{OK: false, Output: "permission denied", Meta: map[string]string{"permission_action": string(agent.PermissionActionDeny)}, Status: tools.StatusError}
 					emitToolResult(options, call, res)
 					return res, nil
@@ -3270,6 +3592,7 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 			}
 		}
 		if outcome, blocked := agent.RunBeforeToolHooks(ctx, agentOpts, call, args); blocked {
+			sandboxEvidenceFrom(ctx).refuseToolCall(options.Registry, name, args, options.runEngine(), schemas.SandboxRefusalHookBlocked)
 			blockedResult := agent.HookBlockedResult(call, outcome)
 			res := ToolResult{
 				OK:           false,
@@ -3296,9 +3619,15 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 			// backend; only the workspace root moves.
 			runOptions.Sandbox = runOptions.Sandbox.ReRooted(cwd)
 		}
+		if options.toolRunSandbox != nil {
+			// A stage call runs under the stage engine, which is already
+			// rooted at the run directory.
+			runOptions.Sandbox = options.toolRunSandbox
+		}
 		res := options.Registry.RunWithOptions(ctx, name, args, runOptions)
 		feedback := agent.RunAfterToolHooks(ctx, agentOpts, call, args, res)
-		if feedback != "" {
+		// A host-seam read returns exact file bytes, so hook feedback never joins them.
+		if feedback != "" && !runOptions.HostSeam {
 			combined, redacted := agent.AppendHookFeedback(res.Output, feedback)
 			res.Output = combined
 			res.Redacted = res.Redacted || redacted
@@ -3317,9 +3646,24 @@ func newAgentToolRunner(options PipelineRunConfig, cwd string) ToolRunner {
 			ChangedFiles: res.ChangedFiles,
 			Display:      res.Display,
 		}
-		emitToolResult(options, call, toolResult)
+		emitted := toolResult
+		if runOptions.HostSeam {
+			// The event stream gets a summary of a raw read, not the whole file.
+			emitted.Output = hostSeamSummary(args, toolResult)
+		}
+		emitToolResult(options, call, emitted)
 		return toolResult, nil
 	})
+}
+
+// hostSeamSummary describes a host-seam read for the event stream: the path,
+// the byte count, and the digest. The reader gets the bytes, not this text.
+func hostSeamSummary(args map[string]any, res ToolResult) string {
+	if !res.OK {
+		return res.Output
+	}
+	path, _ := args["path"].(string)
+	return fmt.Sprintf("host read %s: %d bytes, sha256 %s", path, len(res.Output), tools.HashContent([]byte(res.Output)))
 }
 
 func sandboxRisk(sideEffect tools.SideEffect) sandbox.Risk {
@@ -3662,22 +4006,28 @@ func emitPermissionDecision(options PipelineRunConfig, request agent.PermissionR
 // as its history. The verified flag judges only the final pass: an earlier
 // pass that failed and was repaired does not make the run unverified.
 func finishCompleted(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord, finalState schemas.IterationState, finalRecords []schemas.StageRecord, finalOutputs []schemas.HarnessStageOutput) (schemas.PipelineResult, error) {
-	verified, reason := passVerification(finalRecords, finalOutputs)
-	if !verified && !planHasVerification(plan) {
+	outcome, reason, checks := passVerification(plan, finalRecords, finalOutputs)
+	if outcome == schemas.VerificationOutcomeUnverified && !planHasVerification(plan) {
 		// The plan has no verification stage at all, so the reason names that
 		// cause instead of a generic line.
 		reason = absentVerificationReason(plan)
 	}
 	return schemas.PipelineResult{
-		RunID:            runID,
-		Status:           "completed",
-		Tier:             plan.Tier,
-		Stages:           records,
-		FinalState:       &finalState,
-		Verified:         verified,
-		UnverifiedReason: reason,
+		RunID:               runID,
+		Status:              "completed",
+		Tier:                plan.Tier,
+		Stages:              records,
+		FinalState:          &finalState,
+		Verified:            outcome == schemas.VerificationOutcomeVerified,
+		UnverifiedReason:    reason,
+		VerificationOutcome: outcome,
+		VerificationChecks:  checks,
 	}, nil
 }
+
+// commandPassedReason is the unverified reason of a pass whose only test
+// evidence is a test command that exited 0.
+const commandPassedReason = "test command passed; per-test evidence unavailable"
 
 // absentVerificationReason names why a plan with no verification stage is not
 // verified. A topology with no verification node at any tier is named as the
@@ -3690,20 +4040,33 @@ func absentVerificationReason(plan schemas.ExecutionPlan) string {
 	return string(plan.Tier) + " tier runs no checks"
 }
 
-// passVerification reports whether a completed pass verified anything. The
-// pass is verified when a verification report passed, or a test run executed
-// tests and none failed, and no stage is incomplete or failed. A completed
-// pass that is not verified returns the reason, naming the checks that did not
-// apply. The completion gate already refuses incomplete stages, so this is a
-// second guard for the verified flag.
-func passVerification(records []schemas.StageRecord, outputs []schemas.HarnessStageOutput) (bool, string) {
+// passVerification returns the verification outcome of a completed pass and,
+// when it is not verified, the reason. The pass is verified when a
+// verification report passed, or a test run reported passing tests, and no
+// stage is incomplete or failed and no test failed. A failed test makes the
+// pass unverified even when a report passed. A test command that exited 0
+// with no per-test evidence is not verification: alone it gives the
+// command_passed outcome. A completed pass that is not verified names the
+// checks that did not apply. The completion gate already refuses incomplete
+// stages, so this is a second guard for the verified flag.
+//
+// It also returns one check per verification-relevant stage of the pass
+// (passChecks). The checks describe the pass; they do not decide the outcome.
+func passVerification(plan schemas.ExecutionPlan, records []schemas.StageRecord, outputs []schemas.HarnessStageOutput) (string, string, []schemas.VerificationCheck) {
+	outcome, reason := passOutcome(records, outputs)
+	return outcome, reason, passChecks(plan, records, outputs)
+}
+
+func passOutcome(records []schemas.StageRecord, outputs []schemas.HarnessStageOutput) (string, string) {
 	for _, r := range records {
 		if r.Status == schemas.StageIncomplete || r.Status == schemas.StageFailed {
-			return false, "verification did not finish at stage " + r.Name
+			return schemas.VerificationOutcomeUnverified, "verification did not finish at stage " + r.Name
 		}
 	}
 	passed := false
+	testsFailed := false
 	noTests := false
+	commandPassed := false
 	for _, out := range outputs {
 		if report, ok := verificationReport(out); ok && report.Status == schemas.VerificationPassed {
 			passed = true
@@ -3711,15 +4074,24 @@ func passVerification(records []schemas.StageRecord, outputs []schemas.HarnessSt
 		if results, ok := out.Data["test_results"].(schemas.TestRunResults); ok {
 			switch {
 			case results.Failed() > 0:
+				testsFailed = true
 			case results.Passed() > 0:
 				passed = true
+			case results.Evidence == schemas.TestEvidenceCommandOnly && results.ExitCode == 0:
+				commandPassed = true
 			default:
 				noTests = true
 			}
 		}
 	}
+	if testsFailed {
+		return schemas.VerificationOutcomeUnverified, "tests failed"
+	}
 	if passed {
-		return true, ""
+		return schemas.VerificationOutcomeVerified, ""
+	}
+	if commandPassed {
+		return schemas.VerificationOutcomeCommandPassed, commandPassedReason
 	}
 	var notApplied []string
 	for _, r := range records {
@@ -3731,9 +4103,9 @@ func passVerification(records []schemas.StageRecord, outputs []schemas.HarnessSt
 		notApplied = append(notApplied, "tests (no tests ran)")
 	}
 	if len(notApplied) > 0 {
-		return false, "no check applied: " + strings.Join(notApplied, "; ")
+		return schemas.VerificationOutcomeUnverified, "no check applied: " + strings.Join(notApplied, "; ")
 	}
-	return false, "no verification check passed"
+	return schemas.VerificationOutcomeUnverified, "no verification check passed"
 }
 
 func finishWithReason(runID string, plan schemas.ExecutionPlan, records []schemas.StageRecord, status, reason string) (schemas.PipelineResult, error) {
@@ -3937,12 +4309,53 @@ func completionSummary(result schemas.PipelineResult) string {
 	if result.Status == "completed" && !result.Verified {
 		summary += " Not verified: " + result.UnverifiedReason + "."
 	}
+	var lines []string
+	if result.Status == "completed" {
+		if result.Verified {
+			lines = presentation.VerifiedLines(result.VerificationChecks)
+		} else {
+			lines = presentation.CheckLines(result.VerificationChecks)
+		}
+	}
+	if result.NestedSandboxAccepted {
+		lines = append(lines, presentation.NestedSandboxAcceptedLine)
+	}
+	for _, record := range result.Stages {
+		if line := sandboxEvidenceLine(record); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	for _, line := range lines {
+		summary += "\n" + line
+	}
 	return summary + "\n"
 }
 
 // insertAfterListing places queries right after the leading listing
 // queries, ahead of every other read, so FitAggregate trims other reads
 // first.
+// withCarriedReads adds each carried read the request does not read yet.
+// The reads keep their granted line range and character bound, and follow
+// the listing query.
+func withCarriedReads(req schemas.ContextRequest, carried []schemas.ContextQuery) schemas.ContextRequest {
+	have := map[string]bool{}
+	for _, q := range req.Queries {
+		if q.QueryType == schemas.ContextReadFile && q.Path != nil {
+			have[*q.Path] = true
+		}
+	}
+	var missing []schemas.ContextQuery
+	for _, q := range carried {
+		if q.Path == nil || have[*q.Path] {
+			continue
+		}
+		have[*q.Path] = true
+		missing = append(missing, q)
+	}
+	req.Queries = insertAfterListing(req.Queries, missing)
+	return req
+}
+
 func insertAfterListing(queries, first []schemas.ContextQuery) []schemas.ContextQuery {
 	lead := 0
 	for lead < len(queries) && queries[lead].QueryType == schemas.ContextListFiles {

@@ -157,3 +157,30 @@ func TestEnforcementGapNamesWhyTheSandboxDoesNotEnforce(t *testing.T) {
 		}
 	}
 }
+
+// TestNestedSandboxKeepsInteractiveShellDecisions pins the interactive agent
+// loop under the inherited sandbox markers. EnforcementGap now reports
+// the nested sandbox, but the shell auto-allow and the escalation answer stay
+// as they were: a nested interactive session keeps working, under the outer
+// sandbox.
+func TestNestedSandboxKeepsInteractiveShellDecisions(t *testing.T) {
+	engine := sandboxedShellEngine(t, nativeWrappingBackend)
+	before := engine.Evaluate(context.Background(), bashRequest())
+	beforeEscape := engine.UnsandboxedExecutionAllowed()
+	if before.Action != ActionAllow || !before.AutoAllowed || engine.EnforcementGap() != "" || engine.NestedSandbox() {
+		t.Fatalf("setup: without markers decision=%#v gap=%q", before, engine.EnforcementGap())
+	}
+
+	t.Setenv(EnvSandboxed, "1")
+	t.Setenv(EnvSandboxBackend, string(BackendLinuxBwrap))
+	after := engine.Evaluate(context.Background(), bashRequest())
+	if after.Action != before.Action || after.AutoAllowed != before.AutoAllowed || after.Reason != before.Reason {
+		t.Fatalf("markers changed the interactive shell decision: before=%#v after=%#v", before, after)
+	}
+	if engine.UnsandboxedExecutionAllowed() != beforeEscape {
+		t.Fatal("markers changed UnsandboxedExecutionAllowed")
+	}
+	if engine.EnforcementGap() != NestedSandboxGap || !engine.NestedSandbox() {
+		t.Fatalf("under markers gap=%q nested=%v, want the nested-sandbox gap", engine.EnforcementGap(), engine.NestedSandbox())
+	}
+}

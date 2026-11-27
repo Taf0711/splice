@@ -4,16 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/testrunner"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -36,9 +40,15 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	if len(cmd) > 0 && options.CommandWorkDir != "" {
 		commandWorkDir = options.CommandWorkDir
 		var err error
-		cmd, err = expandConfiguredTestCommand(cmd, input.PriorChangedFiles, options.WorkDir, commandWorkDir)
+		configured := cmd
+		cmd, err = expandConfiguredTestCommand(cmd, input.RunChangedFiles, options.WorkDir, commandWorkDir)
 		if err != nil {
 			return schemas.HarnessStageOutput{}, err
+		}
+		if !expandsToTests(configured, cmd) {
+			output := unmatchedTestOutput(configured)
+			options.report(output.Detail)
+			return output, nil
 		}
 	}
 	if len(cmd) == 0 && !configuredCommand {
@@ -63,14 +73,56 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 	// A1: run Go tests with -json so per-test results exist for repair
 	// evidence and trajectory signals. The suite-entry synthesis below stays
 	// only as a fallback when -json is unavailable or parsing fails.
-	jsonEligible := isGoTestJSONCommand(cmd) || (len(cmd) > 1 && cmd[0] == "go" && cmd[1] == "test")
-	if jsonEligible {
-		cmd = withGoTestJSON(cmd)
+	// pytest and jest runs write a report file into a private directory
+	// instead. Splice reads the file after the run, never the stdout.
+	runner := detectPerTestRunner(cmd, commandWorkDir)
+	jsonEligible := runner == perTestGo
+	// recordedArgv is the argv that results and memory report. It is the
+	// user's argv, plus the Go -json flag as the Go path has always recorded
+	// it. execArgv is the argv that runs: recordedArgv plus any report flags.
+	// The report flags never reach recordedArgv.
+	recordedArgv := cmd
+	execArgv := cmd
+	var reportDir string
+	defer func() {
+		if reportDir != "" {
+			_ = os.RemoveAll(reportDir)
+		}
+	}()
+	switch runner {
+	case perTestGo:
+		recordedArgv = withGoTestJSON(cmd)
+		execArgv = recordedArgv
+		// The -json stream goes to a report file. The bash tool keeps only the
+		// head and tail of a large output. If the directory cannot be made, the
+		// run keeps the stdout path.
+		if dir, err := os.MkdirTemp("", "splice-test-report-"); err == nil {
+			reportDir = dir
+		}
+	case perTestPytest, perTestJest:
+		if !reportConflict(runner, cmd) {
+			// If the directory cannot be made, the run keeps command_only evidence.
+			if dir, err := os.MkdirTemp("", "splice-test-report-"); err == nil {
+				reportDir = dir
+				execArgv = withReportFlags(runner, cmd, dir)
+			}
+		}
+	}
+	// goReport is the file the go test -json stream is written to. Empty when
+	// the run has no report directory.
+	var goReport string
+	if runner == perTestGo && reportDir != "" {
+		goReport = filepath.Join(reportDir, goTestReportFile)
 	}
 	var results schemas.TestRunResults
 	if options.RunTool != nil {
+		bashCommand := shellJoin(execArgv)
+		if goReport != "" {
+			// stderr stays on the tool output. Only the stream goes to the file.
+			bashCommand += " > " + shellJoin([]string{goReport})
+		}
 		bashArgs := map[string]any{
-			"command":    shellJoin(cmd),
+			"command":    bashCommand,
 			"cwd":        commandWorkDir,
 			"timeout_ms": timeout * 1000,
 		}
@@ -89,18 +141,19 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		if err != nil {
 			return schemas.HarnessStageOutput{}, err
 		}
-		results, err = testResultsFromToolResult(recorded, cmd, timeout, durationMs)
+		results, err = testResultsFromToolResult(recorded, recordedArgv, timeout, durationMs)
 		if err != nil {
 			return schemas.HarnessStageOutput{}, err
 		}
 	} else if options.RecordCommand != nil {
 		args := map[string]any{
-			"command":         cmd,
+			"command":         execArgv,
 			"cwd":             commandWorkDir,
 			"timeout_seconds": timeout,
 		}
 		recorded, err := options.RecordCommand(ctx, "splice.test", args, func(runCtx context.Context) (ToolResult, error) {
-			results = runCommand(runCtx, options.Sandbox, cmd, commandWorkDir, timeout)
+			results = runCommand(runCtx, options.Sandbox, execArgv, commandWorkDir, timeout, goReport)
+			results.Command = recordedArgv
 			payload, marshalErr := json.Marshal(results)
 			if marshalErr != nil {
 				return ToolResult{OK: false, Output: marshalErr.Error()}, nil
@@ -117,33 +170,68 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 			}
 		}
 	} else {
-		results = runCommand(ctx, options.Sandbox, cmd, commandWorkDir, timeout)
+		results = runCommand(ctx, options.Sandbox, execArgv, commandWorkDir, timeout, goReport)
+		results.Command = recordedArgv
 	}
 
 	// A1: when the command was JSON-eligible, try per-test parsing first.
 	// The suite-entry synthesis below becomes the last-resort fallback when
 	// -json output is unavailable or fails to parse.
-	var parsedGoJSON bool
+	var parsedPerTest bool
 	var parsedResults schemas.TestRunResults
 	if jsonEligible {
-		parsedResults, parsedGoJSON = parseGoTestJSON(results.Stdout)
+		// The report file is the complete stream. Without it (missing, unsafe
+		// or oversized) the stdout that the run captured is parsed as before.
+		stream := results.Stdout
+		if data, ok := readGoTestReport(reportDir); ok {
+			stream = string(data)
+			results.Stdout = lastBytes(stream, maxStoredGoStdoutBytes)
+		}
+		parsedResults, parsedPerTest = parseGoTestJSON(stream)
+	} else if results.ExitCode != 124 {
+		parsedResults, parsedPerTest = readPerTestReport(runner, reportDir, commandWorkDir)
 	}
 
 	var summary string
 	var confidence float64
-	if results.ExitCode == 0 {
-		if parsedGoJSON && len(parsedResults.Tests) > 0 {
+	frameworkSummary, frameworkConfidence, handled := "", 0.0, false
+	if parsedPerTest && (runner == perTestPytest || runner == perTestJest) && results.ExitCode != 124 {
+		frameworkSummary, frameworkConfidence, handled = applyFrameworkOutcome(&results, parsedResults, runner)
+	}
+	if handled {
+		summary, confidence = frameworkSummary, frameworkConfidence
+	} else if results.ExitCode == 0 {
+		// An exit code proves only that the command succeeded. A "passed"
+		// entry comes only from per-test evidence (go test -json).
+		switch {
+		case parsedPerTest && len(parsedResults.Tests) > 0:
 			results.Tests = parsedResults.Tests
-		} else {
+			results.Evidence = schemas.TestEvidencePerTest
+			summary = "Test command passed."
+			confidence = 1.0
+		case jsonEligible:
 			results.Tests = []schemas.TestCaseResult{{
 				Name:       "suite",
-				Status:     "passed",
+				Status:     "skipped",
 				DurationMs: results.DurationMs,
+				Message:    "no tests ran",
 			}}
+			results.Evidence = schemas.TestEvidenceNone
+			summary = "Test command passed. No tests ran."
+			confidence = 0.5
+		default:
+			results.Tests = []schemas.TestCaseResult{{
+				Name:       "suite",
+				Status:     "skipped",
+				DurationMs: results.DurationMs,
+				Message:    "command succeeded; per-test evidence unavailable",
+			}}
+			results.Evidence = schemas.TestEvidenceCommandOnly
+			summary = "Test command passed. Per-test evidence is not available."
+			confidence = 0.7
 		}
-		summary = "Test command passed."
-		confidence = 1.0
 	} else if results.ExitCode == 124 {
+		results.Evidence = schemas.TestEvidenceNone
 		results.Tests = []schemas.TestCaseResult{{
 			Name:       "suite",
 			Status:     "errored",
@@ -154,9 +242,20 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		confidence = 0.3
 	} else {
 		switch {
-		case parsedGoJSON && len(parsedResults.Tests) > 0:
+		case parsedPerTest && len(parsedResults.Tests) > 0:
 			// Per-test (or per-compile-error) entries from go test -json.
 			results.Tests = parsedResults.Tests
+			results.Evidence = schemas.TestEvidencePerTest
+			if results.Failed() == 0 {
+				// Every reported test passed but the command failed (for
+				// example TestMain calls os.Exit(1)). The exit code wins.
+				results.Tests = append(results.Tests, schemas.TestCaseResult{
+					Name:       "suite",
+					Status:     "failed",
+					DurationMs: results.DurationMs,
+					Message:    fmt.Sprintf("test command exited %d; no failed test was reported", results.ExitCode),
+				})
+			}
 		default:
 			results.Tests = []schemas.TestCaseResult{{
 				Name:       "suite",
@@ -164,27 +263,45 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 				DurationMs: results.DurationMs,
 				Message:    fmt.Sprintf("exit code %d", results.ExitCode),
 			}}
+			results.Evidence = schemas.TestEvidenceCommandOnly
 		}
+		marked := markAlreadyFailing(ctx, &results, options, recordedArgv, commandWorkDir)
 		summary = fmt.Sprintf("Test command failed with exit code %d.", results.ExitCode)
-		evidence := failingEvidenceExcerpt(results.Stdout + "\n" + results.Stderr)
-		if evidence == "" && parsedGoJSON {
-			// The -json stream wraps compiler output in JSON events, so the
-			// raw-line excerpt finds nothing. The parsed compile-error
-			// entries are the evidence; rebuild it from them.
-			var lines []string
-			for _, tc := range results.Tests {
-				if tc.Status == "errored" {
-					lines = append(lines, tc.Name+": "+tc.Message)
+		var evidence string
+		if marked {
+			// The raw output also holds the tests that failed before the run.
+			// The evidence keeps the new failures only.
+			evidence = newFailureEvidence(results)
+		} else {
+			evidence = failingEvidenceExcerpt(results.Stdout + "\n" + results.Stderr)
+			if evidence == "" && parsedPerTest {
+				// The -json stream wraps compiler output in JSON events, so the
+				// raw-line excerpt finds nothing. The parsed compile-error
+				// entries are the evidence; rebuild it from them.
+				var lines []string
+				for _, tc := range results.Tests {
+					if tc.Status == "errored" {
+						lines = append(lines, tc.Name+": "+tc.Message)
+					}
 				}
+				evidence = truncateEvidenceLines(strings.Join(lines, "\n"))
 			}
-			evidence = truncateEvidenceLines(strings.Join(lines, "\n"))
 		}
 		if evidence != "" {
 			// Surface bounded failure evidence into the revision context: a
 			// re-entered writer that only sees "exit code 1" guesses blind.
 			summary += "\nFailing evidence:\n" + evidence
 		}
+		if note := alreadyFailingNote(results); note != "" {
+			summary += "\n" + note
+		}
 		confidence = 0.8
+	}
+
+	if results.ExitCode == 0 {
+		// A passing command can still report failed tests (a pytest or jest
+		// report with failures). Those are compared with the baseline too.
+		markAlreadyFailing(ctx, &results, options, recordedArgv, commandWorkDir)
 	}
 
 	detail := results.Stdout
@@ -202,12 +319,63 @@ func (TestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, prov
 		Summary:    summary,
 		Detail:     detail,
 		Confidence: confidence,
-		Data:       map[string]any{"test_results": results, "test_command": cmd},
+		Data:       map[string]any{"test_results": results, "test_command": recordedArgv},
 	}, nil
 }
 
+// markAlreadyFailing compares the run's failing tests with the pre-run
+// baseline. It runs only for per-test evidence with a failing test, and it
+// returns true when at least one failure was marked as already failing.
+func markAlreadyFailing(ctx context.Context, results *schemas.TestRunResults, options StageOptions, argv []string, dir string) bool {
+	if options.TestBaseline == nil || results.Evidence != schemas.TestEvidencePerTest || results.Failed() == 0 {
+		return false
+	}
+	baseline, ok := options.TestBaseline(ctx, options, argv, dir)
+	if !ok {
+		return false
+	}
+	return schemas.MarkAlreadyFailing(results, baseline) > 0
+}
+
+// newFailureEvidence lists the new failing tests as "name: message" lines,
+// bounded like the other failure evidence.
+func newFailureEvidence(results schemas.TestRunResults) string {
+	var lines []string
+	for _, tc := range results.Tests {
+		if tc.Status == "failed" || tc.Status == "errored" {
+			if !tc.AlreadyFailing {
+				lines = append(lines, tc.Name+": "+tc.Message)
+			}
+		}
+	}
+	return truncateEvidenceLines(strings.Join(lines, "\n"))
+}
+
+// alreadyFailingNote names the failures that were already in the baseline.
+// It returns "" when none were.
+func alreadyFailingNote(results schemas.TestRunResults) string {
+	n := results.FailedBefore()
+	if n == 0 {
+		return ""
+	}
+	var names []string
+	for _, tc := range results.Tests {
+		if tc.AlreadyFailing && len(names) < 10 {
+			names = append(names, tc.Name)
+		}
+	}
+	list := strings.Join(names, ", ")
+	if n > len(names) {
+		list += fmt.Sprintf(", and %d more", n-len(names))
+	}
+	return fmt.Sprintf("%d test(s) already failing before this run (not caused by it): %s", n, list)
+}
+
+// maxConfiguredTestPaths caps the paths that the test placeholders expand to.
+const maxConfiguredTestPaths = 20
+
 // expandConfiguredTestCommand expands whole-argument placeholders from the
-// files changed by earlier write stages in this run.
+// test files for this run. See configuredTestPaths for the selection.
 func expandConfiguredTestCommand(command []string, changedByStage map[string][]string, workspaceRoot, testDir string) ([]string, error) {
 	if testDir == "" {
 		testDir = workspaceRoot
@@ -225,13 +393,12 @@ func expandConfiguredTestCommand(command []string, changedByStage map[string][]s
 		return nil, fmt.Errorf("verify test directory %q is outside workspace %q", testDir, workspaceRoot)
 	}
 
-	paths := changedTestFiles(changedByStage, root, base)
+	paths := configuredTestPaths(changedByStage, root, base)
 	tests := make([]string, len(paths))
 	modules := make([]string, len(paths))
-	for i, path := range paths {
-		tests[i] = path
-		modules[i] = strings.TrimSuffix(path, ".py")
-		modules[i] = strings.ReplaceAll(modules[i], "/", ".")
+	for i, file := range paths {
+		tests[i] = file
+		modules[i] = moduleArg(file)
 	}
 
 	expanded := make([]string, 0, len(command)+len(paths))
@@ -248,14 +415,83 @@ func expandConfiguredTestCommand(command []string, changedByStage map[string][]s
 	return expanded, nil
 }
 
-func changedTestFiles(changedByStage map[string][]string, workspaceRoot, testDir string) []string {
+// expandsToTests reports whether a command with a test placeholder still has
+// test paths after expansion. A command without a placeholder always does.
+func expandsToTests(configured, expanded []string) bool {
+	placeholders := 0
+	for _, arg := range configured {
+		if arg == "{tests}" || arg == "{test_modules}" {
+			placeholders++
+		}
+	}
+	return placeholders == 0 || len(expanded) > len(configured)-placeholders
+}
+
+// unmatchedTestOutput is the result of a configured test command that does not
+// run because no test file matches the change. It records no evidence and no
+// tests ran, so the pass is not verified and no repair starts.
+func unmatchedTestOutput(command []string) schemas.HarnessStageOutput {
+	placeholder := "{test_modules}"
+	if slices.Contains(command, "{tests}") {
+		placeholder = "{tests}"
+	}
+	summary := fmt.Sprintf("No test file matches the change, so the configured test command did not run (it uses %s).", placeholder)
+	results := schemas.TestRunResults{
+		Command:  append([]string(nil), command...),
+		Evidence: schemas.TestEvidenceNone,
+		Tests: []schemas.TestCaseResult{{
+			Name:    "suite",
+			Status:  "skipped",
+			Message: "no tests ran",
+		}},
+	}
+	return schemas.HarnessStageOutput{
+		Summary:    summary,
+		Detail:     summary,
+		Confidence: 0.0,
+		Data: map[string]any{
+			"test_results":      results,
+			"test_command":      nil,
+			"known_limitations": []string{summary},
+		},
+	}
+}
+
+// configuredTestPaths lists the changed test files (sorted), then the existing
+// test files that match a changed source file by naming convention (sorted).
+// Duplicates are dropped, and the list is capped at maxConfiguredTestPaths, so
+// the cap never drops a changed test file for a related one.
+func configuredTestPaths(changedByStage map[string][]string, workspaceRoot, testDir string) []string {
+	seen := map[string]bool{}
+	paths := make([]string, 0)
+	for _, group := range [][]string{
+		changedTestFiles(changedByStage, workspaceRoot, testDir),
+		relatedTestFiles(changedByStage, workspaceRoot, testDir),
+	} {
+		for _, file := range group {
+			if seen[file] {
+				continue
+			}
+			seen[file] = true
+			paths = append(paths, file)
+		}
+	}
+	if len(paths) > maxConfiguredTestPaths {
+		paths = paths[:maxConfiguredTestPaths]
+	}
+	return paths
+}
+
+// changedWorkspaceFiles returns the changed files that exist as regular files
+// inside the workspace, as slash paths relative to it. Each file appears once.
+func changedWorkspaceFiles(changedByStage map[string][]string, workspaceRoot string) []string {
 	stageNames := make([]string, 0, len(changedByStage))
 	for stage := range changedByStage {
 		stageNames = append(stageNames, stage)
 	}
 	sort.Strings(stageNames)
 	seen := map[string]bool{}
-	paths := make([]string, 0)
+	files := make([]string, 0)
 	for _, stage := range stageNames {
 		for _, changed := range changedByStage[stage] {
 			relPath := filepath.ToSlash(filepath.Clean(changed))
@@ -263,20 +499,124 @@ func changedTestFiles(changedByStage map[string][]string, workspaceRoot, testDir
 				continue
 			}
 			absolute := filepath.Join(workspaceRoot, filepath.FromSlash(relPath))
-			relToTestDir, err := filepath.Rel(testDir, absolute)
-			if err != nil || relToTestDir == ".." || strings.HasPrefix(relToTestDir, ".."+string(filepath.Separator)) {
+			// A file removed by a rollback or a delete must not reach the command.
+			if info, serr := os.Stat(absolute); serr != nil || !info.Mode().IsRegular() {
 				continue
 			}
-			relToTestDir = filepath.ToSlash(relToTestDir)
-			if !isTestFilePath(relPath) || seen[relToTestDir] {
+			if seen[relPath] {
+				continue
+			}
+			seen[relPath] = true
+			files = append(files, relPath)
+		}
+	}
+	return files
+}
+
+// insideTestDir returns the slash path of absolute relative to testDir. ok is
+// false when absolute lies outside testDir.
+func insideTestDir(testDir, absolute string) (string, bool) {
+	rel, err := filepath.Rel(testDir, absolute)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
+}
+
+func changedTestFiles(changedByStage map[string][]string, workspaceRoot, testDir string) []string {
+	paths := make([]string, 0)
+	for _, relPath := range changedWorkspaceFiles(changedByStage, workspaceRoot) {
+		if !isTestFilePath(relPath) {
+			continue
+		}
+		relToTestDir, ok := insideTestDir(testDir, filepath.Join(workspaceRoot, filepath.FromSlash(relPath)))
+		if !ok {
+			continue
+		}
+		paths = append(paths, testArg(relToTestDir))
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// testArg is the command argument for one test file, relative to testDir. A Go
+// file names its package directory: go test on a single _test.go file cannot
+// build the package, because the package sources are missing from the build.
+func testArg(relToTestDir string) string {
+	if path.Ext(relToTestDir) != ".go" {
+		return relToTestDir
+	}
+	dir := path.Dir(relToTestDir)
+	if dir == "." {
+		return "."
+	}
+	return "./" + dir
+}
+
+// moduleArg is the {test_modules} form of one argument. A Python file becomes
+// a dotted module name. A Go package argument stays as it is.
+func moduleArg(arg string) string {
+	if arg == "." || strings.HasPrefix(arg, "./") {
+		return arg
+	}
+	module := strings.TrimSuffix(arg, ".py")
+	return strings.ReplaceAll(module, "/", ".")
+}
+
+// relatedTestFiles returns the existing test files that match a changed source
+// file by naming convention. Each candidate must be a regular file inside
+// testDir.
+func relatedTestFiles(changedByStage map[string][]string, workspaceRoot, testDir string) []string {
+	seen := map[string]bool{}
+	paths := make([]string, 0)
+	for _, relPath := range changedWorkspaceFiles(changedByStage, workspaceRoot) {
+		if isTestFilePath(relPath) {
+			continue
+		}
+		for _, candidate := range relatedTestCandidates(relPath) {
+			absolute := filepath.Join(workspaceRoot, filepath.FromSlash(candidate))
+			if info, err := os.Stat(absolute); err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			relToTestDir, ok := insideTestDir(testDir, absolute)
+			if !ok || seen[relToTestDir] {
 				continue
 			}
 			seen[relToTestDir] = true
-			paths = append(paths, relToTestDir)
+			paths = append(paths, testArg(relToTestDir))
 		}
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+// relatedTestCandidates lists the test paths that the naming convention gives
+// for one source file, as slash paths. An unknown extension has none.
+func relatedTestCandidates(relPath string) []string {
+	dir, base := path.Split(relPath)
+	ext := path.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	switch ext {
+	case ".py":
+		return []string{
+			path.Join(dir, "tests", "test_"+name+".py"),
+			path.Join(dir, "test_"+name+".py"),
+			path.Join(dir, name+"_test.py"),
+			path.Join(dir, "tests", name+"_test.py"),
+			// A src or lib layout keeps its tests at the workspace root.
+			path.Join("tests", "test_"+name+".py"),
+		}
+	case ".go":
+		return []string{path.Join(dir, name+"_test.go")}
+	case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs":
+		return []string{
+			path.Join(dir, name+".test"+ext),
+			path.Join(dir, name+".spec"+ext),
+			path.Join(dir, "__tests__", name+".test"+ext),
+			path.Join(dir, "__tests__", name+ext),
+		}
+	}
+	return nil
 }
 
 func isTestFilePath(path string) bool {
@@ -296,8 +636,24 @@ func isTestFilePath(path string) bool {
 		}
 	case strings.Contains(base, ".test.") || strings.Contains(base, ".spec."):
 		return true
+	case isJSSourceExt(base) && hasPathPart(path, "__tests__"):
+		return true
 	}
 	return false
+}
+
+// isJSSourceExt reports whether base has a JavaScript or TypeScript extension.
+func isJSSourceExt(base string) bool {
+	switch path.Ext(base) {
+	case ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs":
+		return true
+	}
+	return false
+}
+
+// hasPathPart reports whether one segment of the slash path equals part.
+func hasPathPart(slashPath, part string) bool {
+	return slices.Contains(strings.Split(slashPath, "/"), part)
 }
 
 func testCommand(workDir string, language string) ([]string, error) {
@@ -332,7 +688,8 @@ func skippedTestOutput(language string) schemas.HarnessStageOutput {
 		reason = fmt.Sprintf("No test command could be detected for language %q; verification could not run.", language)
 	}
 	results := schemas.TestRunResults{
-		Command: []string{"<no test command detected>"},
+		Command:  []string{"<no test command detected>"},
+		Evidence: schemas.TestEvidenceNone,
 		Tests: []schemas.TestCaseResult{{
 			Name:    "suite",
 			Status:  "skipped",
@@ -351,7 +708,9 @@ func skippedTestOutput(language string) schemas.HarnessStageOutput {
 	}
 }
 
-func runCommand(ctx context.Context, sandboxEngine *sandbox.Engine, command []string, cwd string, timeoutSeconds int) schemas.TestRunResults {
+// runCommand runs command under the sandbox. A non-empty stdoutPath also
+// receives the whole stdout. The in-memory capture keeps only its head.
+func runCommand(ctx context.Context, sandboxEngine *sandbox.Engine, command []string, cwd string, timeoutSeconds int, stdoutPath string) schemas.TestRunResults {
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 120
 	}
@@ -376,8 +735,18 @@ func runCommand(ctx context.Context, sandboxEngine *sandbox.Engine, command []st
 	defer plan.Cleanup()
 	stdout, stderr := &limitedWriter{limit: 200_000}, &limitedWriter{limit: 200_000}
 	cmd.Stdout = stdout
+	if stdoutPath != "" {
+		// O_EXCL refuses a path that already exists, including a symbolic link,
+		// so the write never follows a link. If the file cannot be made, the
+		// run keeps the head capture only.
+		if f, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600); err == nil {
+			defer f.Close()
+			cmd.Stdout = io.MultiWriter(f, stdout)
+		}
+	}
 	cmd.Stderr = stderr
 	err := cmd.Run()
+	procrun.ReportRun(inner, cmd, err)
 	durationMs := int(time.Since(start).Milliseconds())
 	exitCode := 0
 	if err != nil {
@@ -447,7 +816,10 @@ func testResultsFromToolResult(res ToolResult, cmd []string, timeoutSeconds, dur
 		if strings.Contains(out, "permission required") || strings.Contains(out, "permission denied") {
 			return schemas.TestRunResults{}, fmt.Errorf("test command denied: %s", res.Output)
 		}
-		if strings.Contains(res.Output, "timed out") {
+		// The tool's own timeout has no real exit code. A command that exited
+		// non-zero keeps its code, even when its output says "timed out"
+		// (go test -timeout prints "panic: test timed out").
+		if exitCode <= 0 && strings.Contains(res.Output, "timed out") {
 			exitCode = 124
 		} else if exitCode == 0 {
 			// A non-OK result with no exit code (e.g. tool not found) is an

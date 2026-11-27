@@ -110,6 +110,10 @@ class GeneratorTests(unittest.TestCase):
             self.assertEqual(second["precursor"], "sympy__x-0")
             self.assertEqual(first_data["base_commit"], "abc0")
             self.assertIn("git checkout", first["setup"])
+            # pytest writes a per-test report, so the baseline can compare
+            # failures. The bin/test script gives command_only evidence.
+            self.assertIn('"python","-m","pytest","-q","-p","no:cacheprovider","{tests}"', first["setup"])
+            self.assertNotIn("bin/test", first["setup"])
 
 
 if __name__ == "__main__":

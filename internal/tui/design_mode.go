@@ -103,6 +103,12 @@ func (m model) startApproval(source splicerun.DesignTransitionSource) (model, te
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "No pending plan. Type /crystallize to create one."})
 		return m, nil
 	}
+	// A plan that already ran is not approved again. The session records it, so
+	// the refusal holds even when a stale plan is still held in memory.
+	if state, err := splicerun.ReconstructDesignState(m.sessionEvents); err == nil && (state.Phase == schemas.DesignPhaseExecuting || state.Phase == schemas.DesignPhaseCompleted) {
+		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "This plan already ran. Type /crystallize to create a new plan revision."})
+		return m, nil
+	}
 	if m.pendingCritique != nil && m.pendingCritique.MustFixBeforeExecution {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Plan has must-fix issues. Revise and re-run /crystallize."})
 		return m, nil
@@ -882,8 +888,11 @@ func (m model) reconstructDesignState() model {
 	case schemas.DesignPhaseConversation, schemas.DesignPhaseReview:
 		m.designMode = true
 	default:
-		// executing or completed: the plan has been approved; design mode is off.
+		// executing or completed: the plan has been approved and ran. Design mode
+		// is off, and no plan waits for approval, so no card or /approve reaches it.
 		m.designMode = false
+		m.pendingPlan = nil
+		m.pendingCritique = nil
 	}
 	return m
 }

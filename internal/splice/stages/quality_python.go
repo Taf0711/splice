@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -62,10 +63,11 @@ func (c pythonSyntaxCheck) Run(ctx context.Context, req VerificationCheckRequest
 	runCtx, cancel := withSubprocessTimeout(ctx)
 	defer cancel()
 
-	// Batched py_compile: one interpreter start for the whole file set instead
-	// of one per file. py_compile stops at the first failing file, so we parse
-	// the traceback to attribute the failure.
-	command := append([]string{"python", "-m", "py_compile"}, pyPaths...)
+	// Batched compile: one interpreter start for the whole file set. The
+	// script calls compile() in memory and writes no bytecode, so a sandbox
+	// that denies writes cannot fail it. It stops at the first failing file,
+	// and parsePyCompileError attributes the failure from its File line.
+	command := append([]string{"python", "-c", pyCompileScript}, pyPaths...)
 	var compileOut string
 	compileOK := true
 	if req.RunTool != nil {
@@ -78,6 +80,9 @@ func (c pythonSyntaxCheck) Run(ctx context.Context, req VerificationCheckRequest
 		}
 		compileOut = res.Output
 		compileOK = res.OK
+		if !compileOK && !pyFailureIsFinding(compileOut) {
+			return pythonIncomplete(pyIncompleteSummary(compileOut))
+		}
 	} else {
 		cmd, plan, cerr := PrepareStageCommand(runCtx, req.Sandbox, req.WorkDir, command)
 		if cerr != nil {
@@ -85,6 +90,7 @@ func (c pythonSyntaxCheck) Run(ctx context.Context, req VerificationCheckRequest
 		}
 		defer plan.Cleanup()
 		out, err := cmd.CombinedOutput()
+		procrun.ReportRun(runCtx, cmd, err)
 		compileOut = string(out)
 		compileOK = err == nil
 		if err != nil {
@@ -93,6 +99,13 @@ func (c pythonSyntaxCheck) Run(ctx context.Context, req VerificationCheckRequest
 			}
 			if errors.Is(runCtx.Err(), context.Canceled) {
 				return VerificationCheckResult{}, runCtx.Err()
+			}
+			if errors.Is(err, exec.ErrNotFound) || strings.Contains(strings.ToLower(err.Error()), "executable file not found") {
+				return pythonIncomplete("Python is not installed; Python syntax check incomplete.")
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != pyCompileErrorExit {
+				return pythonIncomplete(pyIncompleteSummary(compileOut))
 			}
 		}
 	}
@@ -143,6 +156,51 @@ func (c pythonSyntaxCheck) Run(ctx context.Context, req VerificationCheckRequest
 		},
 		Findings: findings,
 	}, nil
+}
+
+// pyCompileScript checks the syntax of each path in argv without writing
+// bytecode. It prints a File line and an error line for the first compile
+// error, and exits pyCompileErrorExit. Any other failure prints a line that
+// starts with "check unavailable:" and exits 2.
+const pyCompileScript = `import sys
+for path in sys.argv[1:]:
+    try:
+        with open(path, "rb") as f:
+            source = f.read()
+        compile(source, path, "exec")
+    except (SyntaxError, ValueError) as e:
+        print('File "%s", line %d' % (path, getattr(e, "lineno", None) or 0))
+        print("%s: %s" % (type(e).__name__, getattr(e, "msg", None) or e))
+        sys.exit(1)
+    except Exception as e:
+        print("check unavailable: %s: %s" % (type(e).__name__, e))
+        sys.exit(2)
+`
+
+// pyCompileErrorExit is the exit code of pyCompileScript for a code error.
+const pyCompileErrorExit = 1
+
+var pyExitCodeRE = regexp.MustCompile(`exit_code: (\d+)`)
+
+// pyFailureIsFinding reports whether a failed run found an error in the code.
+// Only the script's code-error exit code counts. A missing interpreter, a
+// denied read or any other failure leaves the check incomplete.
+func pyFailureIsFinding(output string) bool {
+	m := pyExitCodeRE.FindStringSubmatch(output)
+	return m != nil && m[1] == strconv.Itoa(pyCompileErrorExit)
+}
+
+// pyIncompleteSummary names the first line of a failed run that did not find
+// a code error.
+func pyIncompleteSummary(output string) string {
+	if strings.Contains(strings.ToLower(output), "not found") {
+		return "Python is not installed; Python syntax check incomplete."
+	}
+	detail := strings.TrimSpace(strings.SplitN(output, "\n", 2)[0])
+	if detail == "" {
+		return "Python syntax check did not run."
+	}
+	return "Python syntax check incomplete: " + detail
 }
 
 func pythonIncomplete(summary string) (VerificationCheckResult, error) {
@@ -236,6 +294,7 @@ func runRuff(ctx context.Context, req VerificationCheckRequest, pyPaths []string
 		}
 		defer plan.Cleanup()
 		combined, rerr := cmd.CombinedOutput()
+		procrun.ReportRun(ctx, cmd, rerr)
 		out = combined
 		if rerr != nil {
 			if errors.Is(rerr, exec.ErrNotFound) ||

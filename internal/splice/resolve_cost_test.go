@@ -50,6 +50,34 @@ func TestResolveRequestCostTrustsPositiveReport(t *testing.T) {
 	}
 }
 
+// servedUnpriced is a served estimator for a model the serving catalog does not
+// list, such as an OpenRouter routed ID that is absent from the registry.
+func servedUnpriced(provider string, model string, usage agent.Usage, reported bool) agent.UsageCostEstimate {
+	return catalogUnpriced(model, usage, reported)
+}
+
+func TestResolveRequestCostTrustsReportForModelNotInRegistry(t *testing.T) {
+	reported := 0.0012
+	attributed := attributedWith(&reported, 500)
+	attributed.Model = "deepseek/deepseek-v4.1-flash:floor"
+	got := ResolveRequestCostFor(nil, servedUnpriced, attributed)
+	if got.Status != agent.CostStatusPriced || got.Provenance != agent.CostProvenanceReported || costValue(t, got) != reported {
+		t.Fatalf("reported charge for unregistered routed model = %+v, want priced reported %v", got, reported)
+	}
+	if got.PricingSource != "openrouter" || got.PricingAsOf != "live" {
+		t.Fatalf("pricing source/as-of = %q/%q, want openrouter/live", got.PricingSource, got.PricingAsOf)
+	}
+}
+
+func TestResolveRequestCostUnpricedWithoutReportForModelNotInRegistry(t *testing.T) {
+	attributed := attributedWith(nil, 500)
+	attributed.Model = "deepseek/deepseek-v4.1-flash:floor"
+	got := ResolveRequestCostFor(nil, servedUnpriced, attributed)
+	if got.Status != agent.CostStatusUnpriced || got.CostUSD != nil {
+		t.Fatalf("no report, not in registry = %+v, want unpriced", got)
+	}
+}
+
 func TestResolveRequestCostFallsBackFromZeroReportOnPaidModel(t *testing.T) {
 	zero := 0.0
 	got := ResolveRequestCost(catalogPriced, attributedWith(&zero, 500))

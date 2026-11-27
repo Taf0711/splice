@@ -27,7 +27,7 @@ The project file applies only in a trusted workspace. Splice does not read it
 in a workspace that is not trusted. Trust the workspace with `/trust` in the
 TUI, the `--trust` flag, or `defaultProjectTrust` in the user configuration.
 After `/trust` in the TUI, the project file applies on the next launch. The
-project file cannot set sandbox roots or `worktrees.directory`.
+project file cannot set sandbox roots, `worktrees.directory`, or `plugins`.
 
 Splice applies sources in this order. A later source can replace an earlier
 value.
@@ -57,15 +57,40 @@ still uses the stage sandbox and the normal command allowlist.
 
 Set `verify.testDir` to a relative directory below the workspace. The default is
 the workspace root. Use `{tests}` or `{test_modules}` as a whole command item.
-Splice replaces these items with changed test files from the current pass.
+Splice replaces these items with the test files for the current pass.
 
 ```json
 {"verify":{"testCommand":["python","tests/runtests.py","{test_modules}"],"testDir":"tests"}}
 ```
 
 `{tests}` uses paths relative to `testDir`. `{test_modules}` drops `.py` and
-changes path separators to dots. Splice removes a placeholder when no test file
-changed in the pass.
+changes path separators to dots.
+
+Splice uses two kinds of test file:
+
+- Each changed test file.
+- Each existing test file that has the name of a changed source file.
+
+Rules for the second kind, for a changed source file `dir/name.ext`:
+
+- Python (`.py`): `dir/tests/test_name.py`, `dir/test_name.py`,
+  `dir/name_test.py`, `dir/tests/name_test.py`, and `tests/test_name.py` at
+  the workspace root (for `src` or `lib` layouts).
+- Go (`.go`): the package directory, for example `./dir`. A changed Go source
+  file or Go test file in `dir` gives `./dir` when `dir/name_test.go` exists.
+  Splice passes the package, not one file, because `go test` cannot build a
+  single test file alone.
+- JavaScript and TypeScript (`.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`):
+  `dir/name.test.ext`, `dir/name.spec.ext`, `dir/__tests__/name.test.ext`, and
+  `dir/__tests__/name.ext`. The extension is the same as the source file.
+  A file under a `__tests__` directory is a test file.
+
+Each file must lie inside `testDir`. Splice lists the changed test files first,
+then the related files. It passes at most 20 paths. The cap never drops a
+changed test file for a related one.
+
+When no test file applies, the command does not run. The run records that no
+tests ran. The pass is not verified, and Splice does not start a repair.
 
 ## Pipeline wall-time limit
 
@@ -134,6 +159,76 @@ or write roots, restore protected credential paths, or enable network access.
 
 Use `--add-dir <path>` for a specific extra write root. Use the user
 configuration for persistent personal grants.
+
+Pipeline stages that run repository code use a stricter stage sandbox. It
+keeps your `denyRead` and `denyWrite` entries. It has no network access, and
+it does not read credential files. Your grants and extra roots do not apply
+to it. See [Stage sandbox](PIPELINE.md#stage-sandbox).
+
+When Splice runs inside a sandbox, it cannot apply the stage sandbox. Stage
+commands, command nodes, and agent nodes then refuse to run. To let them run
+under the outer sandbox, set `sandbox.acceptNestedSandbox` in the user
+`config.json`:
+
+```json
+{"sandbox":{"acceptNestedSandbox":true}}
+```
+
+Splice reads this key only from the user configuration. A project
+`config.json`, a provider command, and an environment variable cannot set it.
+The key does not let a command run when no sandbox backend is available or when
+the policy is disabled. It does not change plugin tools or hooks. For one
+`splice exec` run, use `--accept-nested-sandbox`.
+
+## Plugins and hooks
+
+Plugins are third-party code. Splice runs each plugin tool command and each
+plugin hook inside the sandbox, in all modes.
+
+Plugin tools and interactive plugin hooks use the agent sandbox policy. In a
+pipeline run, hooks use the stage sandbox.
+
+A sandboxed plugin can read its own install directory. It cannot read other
+files in the Splice configuration directory, or other plugins.
+
+When no sandbox enforces the policy, a plugin tool or hook does not run.
+Splice shows an error that names the plugin and the configuration key. Splice
+does not run the command on the host as a fallback.
+
+To let one plugin run on the host, set `hostExecution` for its id in the user
+`config.json`:
+
+```json
+{"plugins":{"acme.notes":{"hostExecution":true}}}
+```
+
+Splice reads this key only from the user configuration. A plugin manifest or a
+project `config.json` cannot set it. The opt-in applies to plugins installed in the
+user plugin directory only. The approval prompt of a plugin tool tells
+you when the tool runs on the host.
+
+Hooks that you write in the user `hooks.json` run on the host in the
+interactive agent loop. Trusted project hooks follow the same rule. In a
+pipeline run, these hooks run inside the stage sandbox: the workspace is
+writable, and the network is not available.
+
+To let one hook run on the host in a pipeline run, set `runOnHost` on it in
+the user `hooks.json` (`$XDG_CONFIG_HOME/splice/hooks.json`):
+
+```json
+{"hooks":[{"id":"notify","event":"afterTool","command":"notify-send","args":["done"],"runOnHost":true}]}
+```
+
+Splice ignores `runOnHost` in a project `hooks.json` and shows a warning. When
+the sandbox blocks a hook, or a hook cannot run in the sandbox, the hook fails.
+The message names the hook and the key that allows host execution.
+
+The sandbox cannot read the Splice configuration directory. Thus a hook script
+that you keep in that directory needs `runOnHost` in a pipeline run.
+
+Each hook run writes `execution` (`sandboxed`, `host`, or `refused`) to the hook
+audit log. Each plugin tool result has a `plugin.execution` value and the
+sandbox fields of the run.
 
 ## Worktrees
 

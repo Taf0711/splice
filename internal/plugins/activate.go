@@ -16,6 +16,8 @@ import (
 
 	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/mcp"
+	"github.com/Taf0711/splice/internal/sandbox"
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/secrets"
 	"github.com/Taf0711/splice/internal/skills"
 	"github.com/Taf0711/splice/internal/tools"
@@ -46,6 +48,9 @@ type pluginCommand struct {
 	Cwd     string
 	Stdin   []byte
 	Env     []string
+	// Engine confines the command. Nil means host execution, which invoke
+	// allows only for a plugin the user opted into host execution.
+	Engine *sandbox.Engine
 }
 
 // commandOutput is the captured result of running a pluginCommand. ExitCode is 0
@@ -55,7 +60,12 @@ type commandOutput struct {
 	Stderr   string
 	ExitCode int
 	Err      error
+	// Plan is the sandbox plan of the spawn, when one was prepared.
+	Plan sandbox.CommandPlan
 }
+
+// pluginToolProfile is the procrun profile id of plugin tool spawns.
+const pluginToolProfile = procrun.ProfilePluginTool
 
 // toolRunner executes a resolved plugin tool command. It is injectable so
 // activation can be tested without spawning processes.
@@ -113,6 +123,11 @@ type ActivateOptions struct {
 	// Env supplies the base environment for plugin tool commands. nil uses the
 	// current process environment (os.Environ()).
 	Env []string
+	// HostExecution lists the plugin ids the user opted into host execution
+	// (user config plugins.<id>.hostExecution). Their tool commands and hooks
+	// run on the host; every other plugin runs inside the sandbox. A plugin
+	// manifest can never add itself here.
+	HostExecution map[string]bool
 
 	runTool toolRunner
 }
@@ -162,11 +177,18 @@ func Activate(registry *tools.Registry, loaded []LoadedPlugin, options ActivateO
 		if registry != nil {
 			activateTools(registry, plugin, options, runTool, &result)
 		}
-		activateHooks(plugin, &result)
+		activateHooks(plugin, hostOptedIn(plugin, options), &result)
 		activateSkills(plugin, seenSkillRoot, &result)
 	}
 
 	return result
+}
+
+// hostOptedIn reports whether the user opted this plugin into host execution.
+// Only a plugin from the user plugin root can use the opt-in. A project plugin
+// that shares the id of an opted-in user plugin stays sandboxed.
+func hostOptedIn(plugin LoadedPlugin, options ActivateOptions) bool {
+	return options.HostExecution[plugin.ID] && plugin.Source == SourceUser
 }
 
 // activateTools registers every well-formed tool extension of a plugin and
@@ -197,7 +219,7 @@ func activateTools(registry *tools.Registry, plugin LoadedPlugin, options Activa
 
 // activateHooks builds a hooks.Definition for each well-formed hook extension and
 // appends it (with provenance) to the result.
-func activateHooks(plugin LoadedPlugin, result *ActivationResult) {
+func activateHooks(plugin LoadedPlugin, hostExecution bool, result *ActivationResult) {
 	for _, ext := range plugin.Hooks {
 		if strings.TrimSpace(ext.Command) == "" {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("plugin %q: skipped hook %q with no command", plugin.ID, ext.Name))
@@ -217,6 +239,9 @@ func activateHooks(plugin LoadedPlugin, result *ActivationResult) {
 			Command:     expandPluginRootPath(ext.Command, plugin.PluginDir),
 			Args:        expandPluginRootAll(ext.Args, plugin.PluginDir),
 			Enabled:     true,
+			RunOnHost:   hostExecution,
+			PluginID:    plugin.ID,
+			PluginDir:   plugin.PluginDir,
 		})
 		result.HookProv = append(result.HookProv, HookProvenance{HookID: id, PluginID: plugin.ID})
 	}
@@ -501,6 +526,9 @@ type pluginTool struct {
 	safety      tools.Safety
 	options     ActivateOptions
 	run         toolRunner
+	// hostExecution is the user opt-in for this plugin. Without it the
+	// command runs only inside the sandbox.
+	hostExecution bool
 }
 
 func newPluginTool(plugin LoadedPlugin, ext ToolExtension, options ActivateOptions, run toolRunner) pluginTool {
@@ -509,16 +537,17 @@ func newPluginTool(plugin LoadedPlugin, ext ToolExtension, options ActivateOptio
 		description = fmt.Sprintf("Run plugin tool %s/%s.", plugin.ID, ext.Name)
 	}
 	return pluginTool{
-		name:        ext.Name,
-		description: description,
-		pluginID:    plugin.ID,
-		pluginDir:   plugin.PluginDir,
-		command:     expandPluginRootPath(ext.Command, plugin.PluginDir),
-		args:        expandPluginRootAll(ext.Args, plugin.PluginDir),
-		parameters:  mcp.SchemaFromMCP(ext.InputSchema),
-		safety:      toolSafety(plugin, ext),
-		options:     options,
-		run:         run,
+		name:          ext.Name,
+		description:   description,
+		pluginID:      plugin.ID,
+		pluginDir:     plugin.PluginDir,
+		command:       expandPluginRootPath(ext.Command, plugin.PluginDir),
+		args:          expandPluginRootAll(ext.Args, plugin.PluginDir),
+		parameters:    mcp.SchemaFromMCP(ext.InputSchema),
+		safety:        toolSafety(plugin, ext, hostOptedIn(plugin, options)),
+		options:       options,
+		run:           run,
+		hostExecution: hostOptedIn(plugin, options),
 	}
 }
 
@@ -528,8 +557,9 @@ func (tool pluginTool) Parameters() tools.Schema { return tool.parameters }
 func (tool pluginTool) Safety() tools.Safety     { return tool.safety }
 
 // Run executes the plugin command in the plugin's directory (no caller cwd).
+// No sandbox engine reaches this path, so only a host-opted plugin runs.
 func (tool pluginTool) Run(ctx context.Context, args map[string]any) tools.Result {
-	return tool.invoke(ctx, args, "")
+	return tool.invoke(ctx, args, "", nil)
 }
 
 // RunWithOptions runs the plugin command in the caller's workspace cwd when one is
@@ -537,10 +567,37 @@ func (tool pluginTool) Run(ctx context.Context, args map[string]any) tools.Resul
 // run. Implementing optionsAwareTool also means the registry hands us the run
 // options without changing the core Tool interface.
 func (tool pluginTool) RunWithOptions(ctx context.Context, args map[string]any, options tools.RunOptions) tools.Result {
-	return tool.invoke(ctx, args, options.Cwd)
+	return tool.invoke(ctx, args, options.Cwd, options.Sandbox)
 }
 
-func (tool pluginTool) invoke(ctx context.Context, args map[string]any, cwd string) tools.Result {
+// hostOptInKey is the user config key that allows host execution.
+func (tool pluginTool) hostOptInKey() string {
+	return "plugins." + tool.pluginID + ".hostExecution"
+}
+
+func (tool pluginTool) invoke(ctx context.Context, args map[string]any, cwd string, engine *sandbox.Engine) tools.Result {
+	execution := "sandboxed"
+	if tool.hostExecution {
+		execution = "host"
+		engine = nil
+	} else if gap := engine.EnforcementGap(); gap != "" {
+		// Never fall back to the host. The command does not start.
+		procrun.ReportRefused(ctx, pluginToolProfile, tool.command, engine, procrun.RefusalNoNativeSandbox, gap)
+		meta := tool.meta()
+		meta["plugin.execution"] = "refused"
+		return tools.Result{
+			Status: tools.StatusError,
+			Output: fmt.Sprintf("Error: plugin %q tool %q was not run: plugin tools run only inside the sandbox, and %s. "+
+				"To run this plugin on the host, set %s to true in the user config.json.", tool.pluginID, tool.name, gap, tool.hostOptInKey()),
+			Meta:    meta,
+			Display: tools.Display{Summary: tool.name + " refused", Kind: "plugin"},
+		}
+	} else {
+		// A user plugin lives under the Splice config directory, which the
+		// default policy denies. Let this spawn read its own directory only.
+		engine = engine.WithReadableDir(tool.pluginDir)
+	}
+
 	stdin, err := encodeToolArgs(args)
 	if err != nil {
 		return tools.Result{
@@ -556,11 +613,14 @@ func (tool pluginTool) invoke(ctx context.Context, args map[string]any, cwd stri
 		Cwd:     tool.commandCwd(cwd),
 		Stdin:   stdin,
 		Env:     tool.commandEnv(),
+		Engine:  engine,
 	}
 	output := tool.run(ctx, command)
 
 	meta := tool.meta()
 	meta["exit_code"] = strconv.Itoa(output.ExitCode)
+	meta["plugin.execution"] = execution
+	tools.AddSandboxMeta(meta, output.Plan)
 
 	if output.Err != nil {
 		return tools.Result{
@@ -627,7 +687,7 @@ func (tool pluginTool) meta() map[string]string {
 // reachable when the operator opted into manifest auto-approval at load time
 // (parsePermission clamps allow→prompt otherwise), so honoring it does not
 // silently auto-approve a mutating plugin tool.
-func toolSafety(plugin LoadedPlugin, ext ToolExtension) tools.Safety {
+func toolSafety(plugin LoadedPlugin, ext ToolExtension, hostExecution bool) tools.Safety {
 	permission := tools.PermissionPrompt
 	switch ext.Permission {
 	case PermissionAllow:
@@ -642,8 +702,17 @@ func toolSafety(plugin LoadedPlugin, ext ToolExtension) tools.Safety {
 	return tools.Safety{
 		SideEffect: tools.SideEffectShell,
 		Permission: permission,
-		Reason:     fmt.Sprintf("Plugin tool %s/%s runs the plugin's declared command.", plugin.ID, ext.Name),
+		Reason:     pluginToolReason(plugin.ID, ext.Name, hostExecution),
 	}
+}
+
+// pluginToolReason is the approval prompt text. It says where the command
+// runs, so the user knows when a plugin tool runs on the host.
+func pluginToolReason(pluginID string, name string, hostExecution bool) string {
+	if hostExecution {
+		return fmt.Sprintf("Plugin tool %s/%s runs the plugin's declared command ON THE HOST, outside the sandbox (user config plugins.%s.hostExecution).", pluginID, name, pluginID)
+	}
+	return fmt.Sprintf("Plugin tool %s/%s runs the plugin's declared command inside the sandbox.", pluginID, name)
 }
 
 // encodeToolArgs serializes the tool arguments to JSON for the plugin command's
@@ -688,13 +757,33 @@ func formatPluginToolOutput(output commandOutput) string {
 // JSON args on stdin and capturing stdout/stderr. A non-splice exit is reported via
 // ExitCode; Err is reserved for commands that could not be launched (so a missing
 // binary surfaces as an error, not a misleading exit code).
+//
+// The spawn goes through procrun with command.Engine, the same construction
+// the bash tool uses. A nil engine is the host path (the caller allows it
+// only for a host-opted plugin). With an engine, a plan that the sandbox does
+// not wrap is refused. A timeout kills the whole process group.
 func execPluginCommand(ctx context.Context, command pluginCommand, timeout time.Duration) commandOutput {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, command.Command, command.Args...)
-	cmd.Dir = command.Cwd
-	cmd.Env = command.Env
+	prepared, err := procrun.Prepare(runCtx, procrun.Request{
+		ProfileID: pluginToolProfile,
+		Engine:    command.Engine,
+		Spec: sandbox.CommandSpec{
+			Name: command.Command,
+			Args: command.Args,
+			Dir:  command.Cwd,
+			Env:  command.Env,
+		},
+	})
+	if err != nil {
+		return commandOutput{ExitCode: -1, Err: err}
+	}
+	if command.Engine != nil && !prepared.Plan.Wrapped {
+		procrun.ReportExit(runCtx, prepared.Cmd, procrun.SpawnExit{ExitCode: -1, Refused: procrun.RefusalNoNativeSandbox})
+		return commandOutput{ExitCode: -1, Plan: prepared.Plan, Err: errors.New("the sandbox did not wrap the plugin command, so it was not run")}
+	}
+	cmd := prepared.Cmd
 	if len(command.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(command.Stdin)
 	}
@@ -702,8 +791,14 @@ func execPluginCommand(ctx context.Context, command pluginCommand, timeout time.
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
-	output := commandOutput{Stdout: stdout.String(), Stderr: stderr.String()}
+	err = cmd.Run()
+	procrun.ReportRun(runCtx, cmd, err)
+	output := commandOutput{Stdout: stdout.String(), Stderr: stderr.String(), Plan: prepared.Plan}
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		output.ExitCode = -1
+		output.Err = fmt.Errorf("plugin command timed out after %s; its process group was killed", timeout)
+		return output
+	}
 	if err == nil {
 		return output
 	}

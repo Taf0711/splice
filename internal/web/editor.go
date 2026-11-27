@@ -69,10 +69,15 @@ func (e *Editor) Configure(cfg EditorConfig) {
 	e.cfg = cfg
 }
 
+// config returns the configuration with the active name read now, so a change
+// made outside the editor (`splice pipeline use`, the TUI) shows at once.
 func (e *Editor) config() EditorConfig {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.cfg
+	cfg := e.cfg
+	fresh := splicerun.TopologySourcesFor(cfg.Sources.WorkspaceRoot, cfg.Sources.Trusted)
+	cfg.Sources.ActiveName, cfg.Sources.ActiveNameErr = fresh.ActiveName, fresh.ActiveNameErr
+	return cfg
 }
 
 // Attach registers the editor as the editor surface of server.
@@ -210,11 +215,14 @@ type editorBoot struct {
 	AgentMin    string           `json:"agent_min"`
 	CanUse      bool             `json:"can_use"`
 	Saved       string           `json:"saved"`
+	// Viewer is true when this server serves the pipeline viewer. Only then
+	// does the page load the live run state (../pipeline/graph) and its stream.
+	Viewer bool `json:"viewer"`
 }
 
 func (e *Editor) servePage(w http.ResponseWriter, r *http.Request, action string, viewer bool) {
 	if id := r.URL.Query().Get("draft"); id != "" {
-		e.serveEditorPage(w, id, action)
+		e.serveEditorPage(w, id, action, viewer)
 		return
 	}
 	cfg := e.config()
@@ -237,8 +245,13 @@ func (e *Editor) servePage(w http.ResponseWriter, r *http.Request, action string
 	renderEditor(w, "home", home)
 }
 
-func (e *Editor) serveEditorPage(w http.ResponseWriter, id, action string) {
+func (e *Editor) serveEditorPage(w http.ResponseWriter, id, action string, viewer bool) {
+	e.mu.Lock()
 	d, err := loadDraft(id)
+	if err == nil {
+		d = upgradeLayout(d)
+	}
+	e.mu.Unlock()
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		renderEditor(w, "missing", editorHome{Action: action})
@@ -260,7 +273,7 @@ func (e *Editor) serveEditorPage(w http.ResponseWriter, id, action string) {
 	boot := editorBoot{
 		ID: d.ID, Doc: d.Doc, Positions: d.Positions, Check: checkDoc(d.Doc),
 		Types: page.Types, Permissions: page.Permissions, Models: cfg.Models,
-		AgentMin: schemas.AgentNodeMinSplice, CanUse: cfg.Use != nil,
+		AgentMin: schemas.AgentNodeMinSplice, CanUse: cfg.Use != nil, Viewer: viewer,
 		Saved: d.Updated.Local().Format("15:04:05"),
 	}
 	if boot.Models == nil {
@@ -516,8 +529,8 @@ func (e *Editor) handlePublish(w http.ResponseWriter, r *http.Request, id string
 	writeJSON(w, map[string]any{"name": p.topology.Name, "path": p.path, "replaced": p.exists})
 }
 
-// handleLayout returns the viewer layout of a document, for Auto-layout. It
-// writes nothing.
+// handleLayout returns the viewer layout of a document, for Auto-layout: the
+// positions and the routed edge paths. It writes nothing.
 func (e *Editor) handleLayout(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Doc json.RawMessage `json:"doc"`
@@ -525,12 +538,17 @@ func (e *Editor) handleLayout(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	positions, err := layoutDoc(req.Doc)
+	positions, routes, err := layoutDoc(req.Doc)
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
-	writeJSON(w, map[string][]position{"positions": positions})
+	// paths are the routed edges, keyed by from and to. The editor draws them
+	// while both ends of an edge stay at these positions.
+	writeJSON(w, struct {
+		Positions []position    `json:"positions"`
+		Paths     []layoutRoute `json:"paths"`
+	}{positions, routes})
 }
 
 // handleUse makes a library entry active through the host, as `/pipeline use`.

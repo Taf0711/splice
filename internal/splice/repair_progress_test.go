@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/splice/schemas"
@@ -203,6 +204,33 @@ func TestRepairInstructionDirectionFollowsAuthorship(t *testing.T) {
 	got = repairInstructionDirection(nil, "./session.go:9:2: undefined: NewStore", writerOutput)
 	if got != repairInstruction {
 		t.Fatalf("instruction = %q, want the implementation directive for non-authored compile errors", got)
+	}
+}
+
+// extractFailingTests keeps the package-qualified name in the evidence (two
+// packages stay distinct) and returns bare names, so repair attribution still
+// matches the authored test declaration.
+func TestExtractFailingTestsQualifiedNames(t *testing.T) {
+	results := schemas.TestRunResults{Tests: []schemas.TestCaseResult{
+		{Name: "example.com/m/a.TestLookup", Package: "example.com/m/a", Status: "failed", Message: "boom"},
+		{Name: "example.com/m/b.TestLookup", Package: "example.com/m/b", Status: "passed"},
+		{Name: "suite", Status: "failed", Message: "test command exited 1; no failed test was reported"},
+	}}
+	evidence, names := extractFailingTests(results)
+	wantEvidence := []string{"example.com/m/a.TestLookup: boom", "suite: test command exited 1; no failed test was reported"}
+	if strings.Join(evidence, "|") != strings.Join(wantEvidence, "|") {
+		t.Fatalf("evidence = %q, want %q", evidence, wantEvidence)
+	}
+	if strings.Join(names, "|") != "TestLookup|suite" {
+		t.Fatalf("names = %q, want bare names", names)
+	}
+	writerOutput := schemas.HarnessStageOutput{
+		Data: map[string]any{"code_writer_output": schemas.CodeWriterOutput{
+			Files: []schemas.FileChange{{Path: "lookup_test.go", Content: "package a\n\nfunc TestLookup(t *testing.T) {}\n", ChangeType: "create"}},
+		}},
+	}
+	if got := repairInstructionDirection(names[:1], strings.Join(evidence, "\n"), writerOutput); got != repairTestFileInstruction {
+		t.Fatalf("instruction = %q, want the test-file directive for a qualified authored failure", got)
 	}
 }
 
@@ -447,6 +475,144 @@ func TestAttemptLocalRepairClassifierPreservesOriginalPath(t *testing.T) {
 						t.Fatalf("off mode recorded decisions at %+v: %+v", key, meta.JevDecisions)
 					}
 				}
+			}
+		})
+	}
+}
+
+// A long test name cannot reach the repair evidence untruncated, even when the
+// result did not come through the parser's bound.
+func TestExtractFailingTestsBoundsLongName(t *testing.T) {
+	long := strings.Repeat("n", 3<<20)
+	results := schemas.TestRunResults{Tests: []schemas.TestCaseResult{
+		{Name: long, Status: "failed"},
+	}}
+	evidence, names := extractFailingTests(results)
+	if len(evidence) != 1 || len(names) != 1 {
+		t.Fatalf("evidence = %d, names = %d, want one failure", len(evidence), len(names))
+	}
+	if n := utf8.RuneCountInString(evidence[0]); n > 303 {
+		t.Fatalf("evidence entry is %d runes, want at most 303", n)
+	}
+	if n := utf8.RuneCountInString(names[0]); n > 303 {
+		t.Fatalf("name is %d runes, want at most 303", n)
+	}
+}
+
+// A repair that stalls on the identical failure must end the run in pass 1.
+// No second pass starts, so the code writer runs only the first write and one
+// repair.
+func TestRunStopsAfterRepairNoProgress(t *testing.T) {
+	writerCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairTestResults("failed"), nil
+		}),
+	}
+	var progress strings.Builder
+	options := PipelineConfigFromAgentOptions(agent.Options{Cwd: t.TempDir(), MaxTurns: 4})
+	options.OnReasoning = func(s string) { progress.WriteString(s) }
+
+	result, err := runIterationLoop(context.Background(), "repair-stall", repairTestPlan(), registry,
+		runFakeProvider{}, options, t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "aborted" || result.AbortReason == nil {
+		t.Fatalf("status = %q, abort reason = %v, want aborted", result.Status, result.AbortReason)
+	}
+	if !strings.Contains(*result.AbortReason, repairNoProgressReason) || !strings.Contains(*result.AbortReason, "iteration 1") {
+		t.Fatalf("abort reason = %q, want the repair_no_progress reason for iteration 1", *result.AbortReason)
+	}
+	if strings.Contains(progress.String(), "Starting pipeline iteration 2") {
+		t.Fatalf("a second pass started after the repair stall:\n%s", progress.String())
+	}
+	if writerCalls != 2 {
+		t.Fatalf("code_writer calls = %d, want 2 (first write and one repair in pass 1)", writerCalls)
+	}
+}
+
+// With an escalation model, the first repair stall switches the run to that
+// model instead of stopping it. The escalated pass stalls too, so the run stops
+// at the second stall.
+func TestRunEscalatesOnceBeforeRepairStallStops(t *testing.T) {
+	writerCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairTestResults("failed"), nil
+		}),
+	}
+	var progress strings.Builder
+	options := PipelineConfigFromAgentOptions(agent.Options{Cwd: t.TempDir(), MaxTurns: 4,
+		EscalationModelResolver: func() (agent.ModelSelection, error) {
+			return agent.ModelSelection{Provider: runFakeProvider{}, ProviderName: "escalation-provider", Model: "escalated-model"}, nil
+		}})
+	options.OnReasoning = func(s string) { progress.WriteString(s) }
+
+	result, err := runIterationLoop(context.Background(), "repair-stall-escalate", repairTestPlan(), registry,
+		runFakeProvider{}, options, t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "aborted" || result.AbortReason == nil {
+		t.Fatalf("status = %q, abort reason = %v, want aborted", result.Status, result.AbortReason)
+	}
+	if !strings.Contains(*result.AbortReason, repairNoProgressReason) || !strings.Contains(*result.AbortReason, "iteration 2") {
+		t.Fatalf("abort reason = %q, want the repair_no_progress reason for iteration 2", *result.AbortReason)
+	}
+	if !strings.Contains(progress.String(), "[escalation] switched to model escalated-model for iteration 2") {
+		t.Fatalf("no escalation switch after the first repair stall:\n%s", progress.String())
+	}
+	if n := strings.Count(progress.String(), "[escalation] switched"); n != 1 {
+		t.Fatalf("escalation switches = %d, want 1", n)
+	}
+	if writerCalls != 4 {
+		t.Fatalf("code_writer calls = %d, want 4 (two passes with two writes each)", writerCalls)
+	}
+}
+
+// A repair that resolves the failure must complete the run as before, and no
+// record may carry the stall flag.
+func TestRunContinuesWhenRepairFixesTests(t *testing.T) {
+	var writerCalls, testCalls int
+	options := PipelineConfigFromAgentOptions(agent.Options{Cwd: t.TempDir(), MaxTurns: 4})
+	result, err := runIterationLoop(context.Background(), "repair-fixed", repairTestPlan(),
+		repairTraceRegistry(&writerCalls, &testCalls), runFakeProvider{}, options, t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "completed" {
+		t.Fatalf("status = %q, abort reason = %v, want completed", result.Status, result.AbortReason)
+	}
+	for _, r := range result.Stages {
+		if r.RepairNoProgress {
+			t.Fatalf("record %s iteration %d carries RepairNoProgress after a successful repair", r.Name, r.Iteration)
+		}
+	}
+}
+
+func TestPassRepairStalled(t *testing.T) {
+	cases := []struct {
+		name    string
+		records []schemas.StageRecord
+		want    bool
+	}{
+		{"no records", nil, false},
+		{"no flag", []schemas.StageRecord{{Name: "code_writer"}, {Name: "test_runner", Status: schemas.StageCompleted}}, false},
+		{"flagged test_runner", []schemas.StageRecord{{Name: "code_writer"}, {Name: "test_runner", RepairNoProgress: true}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := passRepairStalled(tc.records); got != tc.want {
+				t.Fatalf("passRepairStalled() = %v, want %v", got, tc.want)
 			}
 		})
 	}

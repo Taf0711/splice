@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="1" skipped="2" tests="6" time="0.030" timestamp="2026-11-12T17:38:01.665664-07:00" hostname="Mac.localdomain"><testcase classname="tests.test_mix" name="test_pass" time="0.000" /><testcase classname="tests.test_mix" name="test_fail" time="0.000"><failure message="assert 1 == 2">def test_fail():
+&gt;       assert 1 == 2
+E       assert 1 == 2
+
+tests/test_mix.py:7: AssertionError</failure></testcase><testcase classname="tests.test_mix" name="test_error" time="0.001"><error message="failed on setup with &quot;RuntimeError: fixture boom&quot;">@pytest.fixture
+    def broken():
+&gt;       raise RuntimeError("fixture boom")
+E       RuntimeError: fixture boom
+
+tests/test_mix.py:11: RuntimeError</error></testcase><testcase classname="tests.test_mix" name="test_skip" time="0.000"><skipped type="pytest.skip" message="not ready">/WORK/py2/tests/test_mix.py:16: not ready</skipped></testcase><testcase classname="tests.test_mix" name="test_xfail" time="0.000"><skipped type="pytest.xfail" message="known bug" /></testcase><testcase classname="tests.test_mix" name="test_xpass" time="0.000" /></testsuite></testsuites>

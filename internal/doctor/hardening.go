@@ -180,6 +180,50 @@ func lspServersCheck(lookup func(string) (string, error)) Check {
 	return check("lsp.servers", "LSP servers", StatusWarn, fmt.Sprintf("%d language server(s) missing from PATH; affected files degrade to text-only edits.", len(missing)), details)
 }
 
+// pipelineTools maps each program the pipeline stages call on PATH to the work
+// that needs it. The Bandit scan runs as "python -m bandit", so it is not listed
+// here: PATH lookup cannot see the module.
+var pipelineTools = []struct{ name, use string }{
+	{"git", "change detection in the stages"},
+	{"go", "Go test runs and Go checks"},
+	{"gosec", "security scan of Go files"},
+	{"trivy", "security scan of the workspace"},
+	{"python", "Python syntax checks, pytest, and Bandit"},
+	{"node", "JavaScript syntax checks"},
+	{"npx", "eslint SARIF scan of JavaScript and TypeScript"},
+}
+
+// pipelineToolchainCheck reports which pipeline tools are on PATH. Every tool is
+// optional. A missing tool makes its stage report the check as incomplete,
+// unavailable, or failed, so the check only warns.
+func pipelineToolchainCheck(lookup func(string) (string, error)) Check {
+	if lookup == nil {
+		lookup = exec.LookPath
+	}
+	present := map[string]any{}
+	missing := map[string]any{}
+	for _, tool := range pipelineTools {
+		if _, err := lookup(tool.name); err == nil {
+			present[tool.name] = "on PATH"
+			continue
+		}
+		// The stages call "python". python3 alone does not satisfy them.
+		if tool.name == "python" {
+			if _, err := lookup("python3"); err == nil {
+				missing[tool.name] = "only python3 is on PATH; the stages call python"
+				continue
+			}
+		}
+		missing[tool.name] = tool.use
+	}
+	details := map[string]any{"present": present}
+	if len(missing) == 0 {
+		return check("pipeline.toolchain", "Pipeline toolchain", StatusPass, "All pipeline tools are on PATH.", details)
+	}
+	details["missing"] = missing
+	return check("pipeline.toolchain", "Pipeline toolchain", StatusWarn, fmt.Sprintf("%d pipeline tool(s) missing from PATH; stages that need a missing tool report their check as incomplete, unavailable, or failed.", len(missing)), details)
+}
+
 // lspRemedy returns an actionable install command for a missing language-server
 // binary. It is provider/tooling neutral and names the ecosystem's standard
 // installer.

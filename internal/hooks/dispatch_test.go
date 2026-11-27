@@ -8,10 +8,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sandbox/procrun"
 )
 
@@ -341,5 +343,225 @@ func TestDispatchBeforeToolFailsClosedWhenHookTimesOut(t *testing.T) {
 	}
 	if !strings.Contains(outcome.Reason, "timed out") {
 		t.Fatalf("Reason = %q, want a timeout reason", outcome.Reason)
+	}
+}
+
+// hookSandboxFixture returns a resolved workspace, the default-policy agent
+// engine, the stage engine, and a target outside the workspace and every
+// temp root (under $HOME). It skips without a native sandbox backend.
+func hookSandboxFixture(t *testing.T) (string, *sandbox.Engine, *sandbox.Engine, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	backend := sandbox.SelectBackend(sandbox.BackendOptions{})
+	if !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve workspace: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("user home unavailable: %v", err)
+	}
+	outsideDir, err := os.MkdirTemp(home, ".splice-hook-test-")
+	if err != nil {
+		t.Skipf("home dir not writable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outsideDir) })
+	policy := sandbox.DefaultPolicy()
+	policy.TempRoot = t.TempDir()
+	agentEngine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: workspace, Policy: policy, Backend: backend})
+	return workspace, agentEngine, procrun.NewStageEngine(workspace), filepath.Join(outsideDir, "pwned.txt")
+}
+
+func writerHook(id string, event Event, target string) Definition {
+	return Definition{ID: id, Event: event, Command: "/bin/sh", Args: []string{"-c", `echo pwned > "$1"`, "hook", target}, Enabled: true}
+}
+
+func lastCompleted(t *testing.T, audit *AuditStore, hookID string) AuditEvent {
+	t.Helper()
+	events, err := audit.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Type == "hook_execution_completed" && events[index].HookID == hookID {
+			return events[index]
+		}
+	}
+	t.Fatalf("no completed record for %s in %+v", hookID, events)
+	return AuditEvent{}
+}
+
+// TestHookPlacementBySourceAndMode pins where each hook runs, in
+// the interactive path (DispatchInput.Sandbox is the agent engine) and in a
+// pipeline run (ForPipeline with the stage engine). A sandbox denial fails
+// loudly with the hook id and the host opt-in key, and the audit record says
+// where the hook ran.
+func TestHookPlacementBySourceAndMode(t *testing.T) {
+	workspace, agentEngine, stageEngine, outside := hookSandboxFixture(t)
+	cases := []struct {
+		name      string
+		hook      Definition
+		pipeline  bool
+		wantWrite bool
+		execution string
+		wantKey   string
+	}{
+		{name: "plugin hook interactive is sandboxed", hook: Definition{PluginID: "acme"}, execution: ExecutionSandboxed, wantKey: "plugins.acme.hostExecution"},
+		{name: "plugin hook pipeline is sandboxed", hook: Definition{PluginID: "acme"}, pipeline: true, execution: ExecutionSandboxed, wantKey: "plugins.acme.hostExecution"},
+		{name: "plugin hook with user opt-in runs on host", hook: Definition{PluginID: "acme", RunOnHost: true}, pipeline: true, wantWrite: true, execution: ExecutionHost},
+		{name: "user hook interactive runs on host", hook: Definition{}, wantWrite: true, execution: ExecutionHost},
+		{name: "user hook pipeline is sandboxed", hook: Definition{}, pipeline: true, execution: ExecutionSandboxed, wantKey: `"runOnHost": true`},
+		{name: "user hook pipeline with runOnHost runs on host", hook: Definition{RunOnHost: true}, pipeline: true, wantWrite: true, execution: ExecutionHost},
+	}
+	for index, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			target := outside + strconv.Itoa(index)
+			hook := writerHook("probe-"+strconv.Itoa(index), EventBeforeTool, target)
+			hook.PluginID, hook.RunOnHost = testCase.hook.PluginID, testCase.hook.RunOnHost
+			audit, err := NewAuditStore(AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			dispatcher := NewDispatcher(DispatcherOptions{Config: beforeToolConfig(hook), Audit: audit, Cwd: workspace})
+			if testCase.pipeline {
+				dispatcher = dispatcher.ForPipeline(stageEngine, workspace)
+			}
+			outcome := dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventBeforeTool, ToolName: "bash", Sandbox: agentEngine})
+
+			_, statErr := os.Stat(target)
+			if testCase.wantWrite {
+				if statErr != nil || outcome.Blocked {
+					t.Fatalf("want the host write: stat=%v outcome=%+v", statErr, outcome)
+				}
+			} else {
+				if !os.IsNotExist(statErr) {
+					t.Fatalf("hook wrote outside the workspace (stat err=%v)", statErr)
+				}
+				if !outcome.Blocked || !strings.Contains(outcome.Reason, hook.ID) || !strings.Contains(outcome.Reason, testCase.wantKey) {
+					t.Fatalf("outcome = %+v, want a loud block naming %s and %s", outcome, hook.ID, testCase.wantKey)
+				}
+			}
+			record := lastCompleted(t, audit, hook.ID)
+			if record.Execution != testCase.execution || record.PluginID != testCase.hook.PluginID {
+				t.Fatalf("audit execution=%q plugin=%q, want %q %q", record.Execution, record.PluginID, testCase.execution, testCase.hook.PluginID)
+			}
+		})
+	}
+}
+
+// TestPipelineFormatterHookWritesInsideWorkspace: a formatter-style afterTool
+// hook that writes inside the workspace still works under the stage engine.
+func TestPipelineFormatterHookWritesInsideWorkspace(t *testing.T) {
+	workspace, _, stageEngine, _ := hookSandboxFixture(t)
+	audit, err := NewAuditStore(AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook := Definition{ID: "fmt", Event: EventAfterTool, Command: "/bin/sh", Args: []string{"-c", "echo formatted > formatted.txt"}, Enabled: true}
+	dispatcher := NewDispatcher(DispatcherOptions{Config: beforeToolConfig(hook), Audit: audit, Cwd: t.TempDir()}).ForPipeline(stageEngine, workspace)
+	dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventAfterTool, ToolName: "write_file"})
+	if data, err := os.ReadFile(filepath.Join(workspace, "formatted.txt")); err != nil || strings.TrimSpace(string(data)) != "formatted" {
+		t.Fatalf("formatter output = %q, %v; want the hook to write inside the run workspace", data, err)
+	}
+	if record := lastCompleted(t, audit, "fmt"); record.Status != AuditCompleted || record.Execution != ExecutionSandboxed {
+		t.Fatalf("audit = %+v, want a completed sandboxed run", record)
+	}
+}
+
+// TestSandboxedHookRefusesWithoutEnforcingEngine: a hook that must run
+// sandboxed, with no enforcing engine, never starts. It never falls back to
+// the host, and a beforeTool hook fails closed.
+func TestSandboxedHookRefusesWithoutEnforcingEngine(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	var spawns int
+	previous := procrun.SetAuditSink(func(procrun.AuditRecord) { spawns++ })
+	t.Cleanup(func() { procrun.SetAuditSink(previous) })
+	disabled := sandbox.DefaultPolicy()
+	disabled.Mode = sandbox.ModeDisabled
+	disabledEngine := sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: t.TempDir(), Policy: disabled})
+	for name, dispatch := range map[string]func(*Dispatcher) DispatchOutcome{
+		"plugin hook, nil engine": func(d *Dispatcher) DispatchOutcome {
+			return d.Dispatch(context.Background(), DispatchInput{Event: EventBeforeTool, ToolName: "bash"})
+		},
+		"plugin hook, disabled engine": func(d *Dispatcher) DispatchOutcome {
+			return d.Dispatch(context.Background(), DispatchInput{Event: EventBeforeTool, ToolName: "bash", Sandbox: disabledEngine})
+		},
+		"pipeline, disabled stage engine": func(d *Dispatcher) DispatchOutcome {
+			return d.ForPipeline(disabledEngine, "").Dispatch(context.Background(), DispatchInput{Event: EventBeforeTool, ToolName: "bash"})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spawns = 0
+			marker := filepath.Join(t.TempDir(), "ran")
+			hook := writerHook("guard", EventBeforeTool, marker)
+			hook.PluginID = "acme"
+			audit, err := NewAuditStore(AuditStoreOptions{AuditPath: filepath.Join(t.TempDir(), "audit.jsonl")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := dispatch(NewDispatcher(DispatcherOptions{Config: beforeToolConfig(hook), Audit: audit}))
+			if record := lastCompleted(t, audit, "guard"); record.Execution != ExecutionRefused || record.Status != AuditBlocked {
+				t.Fatalf("audit = %+v, want a blocked record with execution refused", record)
+			}
+			if !result.Blocked || !strings.Contains(result.Reason, "plugins.acme.hostExecution") {
+				t.Fatalf("outcome = %+v, want a fail-closed refusal naming the key", result)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) || spawns != 0 {
+				t.Fatalf("hook started (stat err=%v, spawns=%d), want zero spawn", err, spawns)
+			}
+		})
+	}
+}
+
+// TestUserHookScriptUnderConfigDirNeedsRunOnHostInPipeline: a user hook script
+// stored under the Splice config directory (a default DenyRead entry) cannot
+// run in the pipeline sandbox. User hooks get no read carve-out. The failure
+// is loud and names runOnHost, and runOnHost makes the hook work.
+func TestUserHookScriptUnderConfigDirNeedsRunOnHostInPipeline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	if backend := sandbox.SelectBackend(sandbox.BackendOptions{}); !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(base, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	script := filepath.Join(home, ".config", "splice", "hooks", "fmt.sh")
+	workspace := filepath.Join(base, "workspace")
+	for _, dir := range []string{filepath.Dir(script), workspace} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho formatted\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stageEngine := procrun.NewStageEngineFrom(sandbox.NewEngine(sandbox.EngineOptions{WorkspaceRoot: workspace, Policy: sandbox.DefaultPolicy(), Backend: sandbox.SelectBackend(sandbox.BackendOptions{})}), workspace)
+
+	hook := Definition{ID: "fmt", Event: EventBeforeTool, Command: script, Enabled: true}
+	dispatcher := NewDispatcher(DispatcherOptions{Config: beforeToolConfig(hook), Cwd: workspace})
+	outcome := dispatcher.ForPipeline(stageEngine, workspace).Dispatch(context.Background(), DispatchInput{Event: EventBeforeTool, ToolName: "bash"})
+	if !outcome.Blocked || !strings.Contains(outcome.Reason, `hook "fmt"`) || !strings.Contains(outcome.Reason, `"runOnHost": true`) {
+		t.Fatalf("pipeline outcome = %+v, want a loud block naming the hook and runOnHost", outcome)
+	}
+	if outcome := dispatcher.Dispatch(context.Background(), DispatchInput{Event: EventBeforeTool, ToolName: "bash"}); outcome.Blocked {
+		t.Fatalf("interactive outcome = %+v, want the host run", outcome)
+	}
+	hook.RunOnHost = true
+	trusted := NewDispatcher(DispatcherOptions{Config: beforeToolConfig(hook), Cwd: workspace}).ForPipeline(stageEngine, workspace)
+	if outcome := trusted.Dispatch(context.Background(), DispatchInput{Event: EventBeforeTool, ToolName: "bash"}); outcome.Blocked {
+		t.Fatalf("runOnHost outcome = %+v, want the host run", outcome)
 	}
 }

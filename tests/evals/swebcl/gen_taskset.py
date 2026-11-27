@@ -36,7 +36,8 @@ def _load_invalid(path: Optional[str]) -> Dict[str, str]:
 def _json_script(base_commit: str) -> str:
     # Keep this a POSIX shell script. The runner invokes /bin/sh and the
     # config file must survive a fresh checkout before every task.
-    config = '{"verify":{"testCommand":["python","bin/test","-C","{tests}"]}}'
+    # pytest writes a per-test report, so the baseline can compare failures.
+    config = '{"verify":{"testCommand":["python","-m","pytest","-q","-p","no:cacheprovider","{tests}"]}}'
     return "git checkout -qf %s && git clean -qfdx -e .splice && mkdir -p .splice && printf '%%s\\n' %s > .splice/config.json" % (shlex.quote(base_commit), shlex.quote(config))
 
 

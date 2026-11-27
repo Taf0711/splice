@@ -14,6 +14,13 @@ import (
 // accepts. Any other value is a hard error that names the supported set.
 const TopologySchemaVersion = 1
 
+// Topology size limits. The browser layout takes seconds for a much larger
+// graph, and it runs under the viewer lock, so a larger file is refused.
+const (
+	MaxTopologyNodes = 256
+	MaxTopologyEdges = 2048
+)
+
 // Custom pipeline node types. Every other Type value must name a builtin
 // stage (see IsBuiltinStageType).
 const (
@@ -108,7 +115,8 @@ type NodeCapabilities struct {
 	// PullMemory is nil when the builtin profile decides.
 	PullMemory *bool `json:"pull_memory,omitempty"`
 	// ProducesVerification marks a node whose report feeds the trajectory
-	// monitor. Custom nodes may set it. A builtin profile may also set it.
+	// monitor. Custom nodes may set it. A builtin node may set it only when its
+	// builtin profile is a verification stage (see Validate).
 	ProducesVerification bool `json:"produces_verification,omitempty"`
 }
 
@@ -333,6 +341,9 @@ func (n PipelineNode) Validate() error {
 		if profile, ok := builtinCapabilityProfile[n.Type]; ok && !profile.ModelFree && n.Caps.ModelFree {
 			return fmt.Errorf("node %s: type %q is model-backed in the builtin profile; model_free must be false", n.Name, n.Type)
 		}
+		if profile, ok := builtinCapabilityProfile[n.Type]; ok && !profile.ProducesVerification && n.Caps.ProducesVerification {
+			return fmt.Errorf("node %s: field produces_verification is not valid for type %q, which does not produce verification; only the verification stages (static_analyzer, security_auditor, test_runner, acceptance_verifier) may set it", n.Name, n.Type)
+		}
 	case n.Type == NodeTypePrompt:
 		if strings.TrimSpace(n.Prompt) == "" {
 			return fmt.Errorf("node %s: type %q requires a non-empty prompt", n.Name, NodeTypePrompt)
@@ -460,6 +471,12 @@ func (t PipelineTopology) Validate() error {
 	}
 	if len(t.Nodes) == 0 {
 		return fmt.Errorf("topology %s: at least one node is required", t.Name)
+	}
+	if len(t.Nodes) > MaxTopologyNodes {
+		return fmt.Errorf("topology %s: %d nodes exceed the limit of %d", t.Name, len(t.Nodes), MaxTopologyNodes)
+	}
+	if len(t.Edges) > MaxTopologyEdges {
+		return fmt.Errorf("topology %s: %d edges exceed the limit of %d", t.Name, len(t.Edges), MaxTopologyEdges)
 	}
 	nodeByName := make(map[string]PipelineNode, len(t.Nodes))
 	for i, node := range t.Nodes {

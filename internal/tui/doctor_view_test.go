@@ -111,6 +111,7 @@ func TestDoctorCommandOutputGroupsStoredKeyAndPipelineChecks(t *testing.T) {
 	output := doctorCommandOutput(doctor.Report{Checks: []doctor.Check{
 		doctorCheck("provider.storedkey", doctor.StatusPass, "Stored key reachable."),
 		doctorCheck("trajectory.classifier", doctor.StatusPass, "Trajectory classifier is off."),
+		doctorCheck("pipeline.toolchain", doctor.StatusPass, "All pipeline tools are on PATH."),
 	}}, nil)
 
 	provider := doctorSection(output, "Provider")
@@ -124,6 +125,7 @@ func TestDoctorCommandOutputGroupsStoredKeyAndPipelineChecks(t *testing.T) {
 		t.Fatalf("missing Pipeline section: %#v", output.Sections)
 	}
 	assertRowsContain(t, pipeline.Rows, "trajectory.classifier")
+	assertRowsContain(t, pipeline.Rows, "pipeline.toolchain")
 	if other := doctorSection(output, "Other"); other != nil {
 		t.Fatalf("known checks must not fall under Other: %#v", other.Rows)
 	}

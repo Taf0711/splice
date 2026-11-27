@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 )
 
 // defaultSubprocessTimeout bounds deterministic subprocess execution in the
@@ -44,6 +46,7 @@ func runRecordedOutput(ctx context.Context, options StageOptions, name string, a
 		}
 		defer plan.Cleanup()
 		out, err := cmd.Output()
+		procrun.ReportRun(runCtx, cmd, err)
 		return ToolResult{OK: err == nil, Output: string(out)}, err
 	}
 	if options.RecordCommand == nil {

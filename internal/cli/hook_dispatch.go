@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"fmt"
+	"io"
+
 	"github.com/Taf0711/splice/internal/hooks"
 )
 
@@ -13,11 +16,18 @@ import (
 // Plugin hooks are appended after the configured hooks; their ids are
 // plugin-namespaced (plugin id + hook name) so they never collide with hooks.json
 // ids. A nil/empty extra slice adds nothing. When disableProject is true, the
-// project hooks.json layer is skipped (untrusted workspace).
-func newHookDispatcherWithExtra(workspaceRoot string, disableProject bool, extra []hooks.Definition) *hooks.Dispatcher {
+// project hooks.json layer is skipped (untrusted workspace). A setting that
+// a layer may not set (runOnHost in the project hooks.json) is ignored and
+// reported on stderr.
+func newHookDispatcherWithExtra(workspaceRoot string, disableProject bool, extra []hooks.Definition, stderr io.Writer) *hooks.Dispatcher {
 	loaded, err := hooks.LoadConfig(hooks.LoadOptions{Cwd: workspaceRoot, DisableProject: disableProject})
 	if err != nil {
 		return nil
+	}
+	for _, diagnostic := range loaded.Diagnostics {
+		if diagnostic.Kind == hooks.DiagnosticIgnored && stderr != nil {
+			_, _ = fmt.Fprintf(stderr, "[splice] WARNING: hooks: %s (%s)\n", diagnostic.Message, diagnostic.Path)
+		}
 	}
 	var audit *hooks.AuditStore
 	if store, err := hooks.NewAuditStore(hooks.AuditStoreOptions{}); err == nil {

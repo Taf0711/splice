@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -570,6 +572,41 @@ func TestPipelineRedactsNamesAndTypes(t *testing.T) {
 	}
 }
 
+// TestPipelineGraphCarriesTheNodeFrames pins the frames that the editor
+// paints the run from: the graph endpoint carries one frame per node, the
+// same frames as the node events, after the same redaction as the page.
+func TestPipelineGraphCarriesTheNodeFrames(t *testing.T) {
+	view := NewPipelineView(pipelineWorkspace(t), "")
+	view.SetSecrets([]string{"lint"})
+	s, cookie := startPipeline(t, view)
+	graphOf := func() (graphData, string) {
+		t.Helper()
+		raw := readBody(t, send(t, http.MethodGet, s.at("/s/pipeline/graph"), nil, cookie))
+		var data graphData
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			t.Fatalf("graph %s: %v", raw, err)
+		}
+		return data, raw
+	}
+	static, _ := graphOf()
+	if static.RunState != "static" || len(static.Nodes) != 4 || static.Nodes[0].Status != "static" {
+		t.Fatalf("static graph: state %q, nodes %+v; want four static frames", static.RunState, static.Nodes)
+	}
+	view.Observe(pipelineRun(t))
+	live, raw := graphOf()
+	status := map[string]string{}
+	for _, frame := range live.Nodes {
+		status[frame.Name] = frame.Status
+	}
+	want := map[string]string{"code_writer": "complete", "[REDACTED]": "failed", "static_analyzer": "pending", "test_runner": "pending"}
+	if fmt.Sprint(status) != fmt.Sprint(want) || live.RunState != "running" {
+		t.Fatalf("live frames = %v, state %q; want %v while running", status, live.RunState, want)
+	}
+	if strings.Contains(raw, `"lint"`) {
+		t.Fatalf("the graph data leaks a redacted name: %s", raw)
+	}
+}
+
 // TestPipelineServesItsFavicon pins item 12 of the review: the page links a
 // favicon under the surface, so the browser makes no request that 404s.
 func TestPipelineServesItsFavicon(t *testing.T) {
@@ -596,5 +633,271 @@ func TestPipelineGraphDataKeepsTheRunLine(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"run_seq":3`) || !strings.Contains(string(data), `"run":"Running."`) {
 		t.Fatalf("graph data = %s, want both the run sequence and the run line", data)
+	}
+}
+
+// TestUseAfterAFinishedRunKeepsTheRunGraph pins that a pipeline use while a
+// finished run is in view keeps the run's graph on the page.
+func TestUseAfterAFinishedRunKeepsTheRunGraph(t *testing.T) {
+	writeDiamondAndTeam(t)
+	if _, _, err := splicerun.ActivateLibraryPipeline("diamond"); err != nil {
+		t.Fatal(err)
+	}
+	view := NewPipelineView(splicerun.TopologySourcesFor(t.TempDir(), false), "")
+	s, cookie := startPipeline(t, view)
+	view.Observe(pipelineRun(t))
+	if _, _, err := splicerun.ActivateLibraryPipeline("team"); err != nil {
+		t.Fatal(err)
+	}
+	view.Configure(splicerun.TopologySourcesFor(t.TempDir(), false), "")
+	after := readBody(t, send(t, http.MethodGet, s.at("/s/pipeline/"), nil, cookie))
+	if strings.Contains(after, "run plan only") {
+		t.Fatalf("after use, the finished run lost its graph: %q", after)
+	}
+}
+
+// writeDiamondAndTeam writes two library entries, diamond and team, that have
+// the same nodes, and points XDG_CONFIG_HOME at them.
+func writeDiamondAndTeam(t *testing.T) {
+	t.Helper()
+	config := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", config)
+	dir := filepath.Join(config, "splice", "pipelines")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"diamond", "team"} {
+		top := pipelineDiamond()
+		top.Name = name
+		data, err := json.Marshal(top)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name+".json"), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestNewRunAfterAUseResolvesTheNewTopology pins that a run which starts after a
+// pipeline use resolves the active topology again, even when it names the
+// topology of the run before.
+func TestNewRunAfterAUseResolvesTheNewTopology(t *testing.T) {
+	writeDiamondAndTeam(t)
+	if _, _, err := splicerun.ActivateLibraryPipeline("diamond"); err != nil {
+		t.Fatal(err)
+	}
+	view := NewPipelineView(splicerun.TopologySourcesFor(t.TempDir(), false), "")
+	view.Observe(pipelineRun(t))
+	view.mu.Lock()
+	view.resolveRunTopologyLocked() // the page resolved the first run
+	view.mu.Unlock()
+	if _, _, err := splicerun.ActivateLibraryPipeline("team"); err != nil {
+		t.Fatal(err)
+	}
+	view.Configure(splicerun.TopologySourcesFor(t.TempDir(), false), "")
+	view.BeginRun(nil)
+	plan := agent.PipelinePlanEvent{Stages: []string{"code_writer"}, Dependencies: map[string][]string{}}
+	state, err := presentation.Apply(presentation.State{}, presentrun.AdaptPipelinePlan(schemas.ExecutionPlan{RequestIntent: "x", Tier: schemas.TierStandard, TopologyName: "diamond"}, plan))
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.Observe(state)
+	view.mu.Lock()
+	defer view.mu.Unlock()
+	view.resolveRunTopologyLocked()
+	if !strings.Contains(view.runTopologyNote, "the active topology is team, not the run's diamond") {
+		t.Fatalf("the new run kept the old topology: note %q, topology %v", view.runTopologyNote, view.runTopology)
+	}
+}
+
+// TestGraphResponseRedactsTheFrames pins that no part of the graph response,
+// the frames included, carries a secret of the run: in a node name, in a
+// removal reason that the status label shows, or in a failure detail.
+func TestGraphResponseRedactsTheFrames(t *testing.T) {
+	const secret = "sk-FRAME-SECRET-VALUE"
+	view := NewPipelineView(pipelineWorkspace(t), "")
+	view.SetSecrets([]string{secret, "static_analyzer"})
+	s, cookie := startPipeline(t, view)
+	state := pipelineRun(t,
+		presentrun.AdaptStageEvent(agent.StageEvent{Name: "static_analyzer", Status: "failed", Detail: "key " + secret}),
+	)
+	state.Plan.Removed = map[string]string{"test_runner": "flag " + secret + " is off"}
+	state.Plan.Stages = state.Plan.Stages[:3]
+	view.Observe(state)
+	raw := readBody(t, send(t, http.MethodGet, s.at("/s/pipeline/graph"), nil, cookie))
+	if strings.Contains(raw, secret) || strings.Contains(raw, "static_analyzer") {
+		t.Fatalf("the graph response carries a secret: %s", raw)
+	}
+	var data graphData
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, frame := range data.Nodes {
+		if frame.Name == "test_runner" {
+			found = strings.Contains(frame.Label, "[REDACTED]")
+		}
+	}
+	if !found {
+		t.Fatalf("the frame of the removed node does not show the redacted reason: %+v", data.Nodes)
+	}
+}
+
+func TestLivePageListsTheCommandNodes(t *testing.T) {
+	view := NewPipelineView(pipelineWorkspace(t), "")
+	s, cookie := startPipeline(t, view)
+	view.Observe(pipelineRun(t))
+	live := readBody(t, send(t, http.MethodGet, s.at("/s/pipeline/"), nil, cookie))
+	if !strings.Contains(live, "<h2>Command nodes</h2>") || !strings.Contains(live, "go vet ./...") {
+		t.Fatal("a page loaded during a run does not list the command nodes of the run's topology")
+	}
+}
+
+// TestLivePageDisclosesTheRunTopologyRedacted pins the live disclosure: the
+// note says that the lists are the run's topology, the command line passes
+// redaction, and a plan-only run has no lists.
+func TestLivePageDisclosesTheRunTopologyRedacted(t *testing.T) {
+	view := NewPipelineView(pipelineWorkspace(t), "")
+	view.SetSecrets([]string{"vet"})
+	s, cookie := startPipeline(t, view)
+	page := func() string {
+		return readBody(t, send(t, http.MethodGet, s.at("/s/pipeline/"), nil, cookie))
+	}
+	if static := page(); !strings.Contains(static, "Active topology at page load.") {
+		t.Fatal("the static page lost its note")
+	}
+	view.Observe(pipelineRun(t))
+	live := page()
+	if !strings.Contains(live, "Topology of the run in view.") || strings.Contains(live, "Active topology at page load.") {
+		t.Fatal("the live page does not say that the lists are the run's topology")
+	}
+	if strings.Contains(live, "go vet") || !strings.Contains(live, "go [REDACTED]") {
+		t.Fatal("a secret in a command line reached the live page")
+	}
+
+	// A topology on disk that no longer matches the run plan: the graph shows
+	// the plan only, so the page must not list that file's command nodes.
+	sources := pipelineWorkspace(t)
+	changed := pipelineDiamond()
+	changed.Edges = changed.Edges[:3]
+	data, err := json.Marshal(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sources.WorkspaceRoot, ".splice", "pipeline.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stale := NewPipelineView(sources, "")
+	s2, cookie2 := startPipeline(t, stale)
+	stale.Observe(pipelineRun(t))
+	planOnly := readBody(t, send(t, http.MethodGet, s2.at("/s/pipeline/"), nil, cookie2))
+	if stale.runTopology == nil || !strings.Contains(planOnly, "run plan only") {
+		t.Fatal("fixture: the run topology must resolve and not match the plan")
+	}
+	if strings.Contains(planOnly, "<h2>Command nodes</h2>") || strings.Contains(planOnly, "<h2>Agent nodes</h2>") {
+		t.Fatal("a plan-only page lists command or agent nodes")
+	}
+}
+
+// TestLivePageRedactsTheAgentPrompt pins the live disclosure of an agent
+// node: the run's agent node is listed, and a secret in its prompt is not.
+func TestLivePageRedactsTheAgentPrompt(t *testing.T) {
+	const secret = "sk-AGENT-PROMPT-SECRET"
+	sources := pipelineWorkspace(t)
+	top := pipelineDiamond()
+	top.MinSplice = schemas.AgentNodeMinSplice
+	top.Nodes = append(top.Nodes, schemas.PipelineNode{Name: "reviewer", Type: schemas.NodeTypeAgent, Prompt: "use key " + secret, Tools: []string{"read_file"}, Budget: &schemas.StageBudget{InputMax: 4000, OutputMax: 1000}})
+	top.Edges = append(top.Edges, schemas.PipelineEdge{From: "test_runner", To: "reviewer"})
+	data, err := json.Marshal(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sources.WorkspaceRoot, ".splice", "pipeline.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := splicerun.CompileTopology(top, schemas.TierStandard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := agent.PipelinePlanEvent{Dependencies: map[string][]string{}}
+	for _, stage := range compiled.Stages {
+		plan.Stages = append(plan.Stages, stage.Name)
+		if len(stage.DependsOn) > 0 {
+			plan.Dependencies[stage.Name] = stage.DependsOn
+		}
+	}
+	state, err := presentation.Apply(presentation.State{}, presentrun.AdaptPipelinePlan(schemas.ExecutionPlan{RequestIntent: "x", Tier: schemas.TierStandard, TopologyName: top.Name}, plan))
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := NewPipelineView(sources, "")
+	view.SetSecrets([]string{secret})
+	s, cookie := startPipeline(t, view)
+	view.Observe(state)
+	page := readBody(t, send(t, http.MethodGet, s.at("/s/pipeline/"), nil, cookie))
+	if !strings.Contains(page, "<h2>Agent nodes</h2>") || !strings.Contains(page, "Topology of the run in view.") {
+		t.Fatal("the live page does not list the run's agent node")
+	}
+	if strings.Contains(page, secret) || !strings.Contains(page, "use key [REDACTED]") {
+		t.Fatal("a secret in an agent prompt reached the live page")
+	}
+}
+
+// writeProject writes a topology as the project file of a workspace.
+func writeProject(t *testing.T, root string, topology *schemas.PipelineTopology) {
+	t.Helper()
+	data, err := json.Marshal(topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".splice", "pipeline.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLiveDisclosureOfAFileChangedMidRun pins that the run topology is the
+// one at the first snapshot of the run: a project file that changes later,
+// with the same structure, does not reach the command list of a live page.
+func TestLiveDisclosureOfAFileChangedMidRun(t *testing.T) {
+	sources := pipelineWorkspace(t)
+	view := NewPipelineView(sources, "")
+	view.Observe(pipelineRun(t)) // no page is open yet
+	changed := pipelineDiamond()
+	changed.Nodes[1].Command = []string{"curl", "evil.example"}
+	writeProject(t, sources.WorkspaceRoot, changed)
+	view.Observe(pipelineRun(t)) // a later snapshot of the same run reads no file
+	s, cookie := startPipeline(t, view)
+	page := readBody(t, send(t, http.MethodGet, s.at("/s/pipeline/"), nil, cookie))
+	if strings.Contains(page, "curl evil.example") {
+		t.Fatal("the live page lists a command line that the run does not run")
+	}
+	if !strings.Contains(page, "go vet ./...") {
+		t.Fatal("the live page lost the command line of the run")
+	}
+}
+
+// TestNewRunResolvesTheChangedFile pins the other side of the pin: a new run
+// (BeginRun) after a change of the project file shows the new file, and Reset
+// drops the pin.
+func TestNewRunResolvesTheChangedFile(t *testing.T) {
+	sources := pipelineWorkspace(t)
+	view := NewPipelineView(sources, "")
+	view.Observe(pipelineRun(t))
+	changed := pipelineDiamond()
+	changed.Nodes[1].Command = []string{"golangci-lint", "run"}
+	writeProject(t, sources.WorkspaceRoot, changed)
+	view.BeginRun(nil)
+	view.Observe(pipelineRun(t))
+	s, cookie := startPipeline(t, view)
+	page := readBody(t, send(t, http.MethodGet, s.at("/s/pipeline/"), nil, cookie))
+	if !strings.Contains(page, "golangci-lint run") || strings.Contains(page, "go vet ./...") {
+		t.Fatal("a new run after a file change does not show the new file")
+	}
+	view.Reset()
+	view.mu.Lock()
+	defer view.mu.Unlock()
+	if view.runTopologyName != "" || view.runTopology != nil {
+		t.Fatal("Reset kept the pinned run topology")
 	}
 }

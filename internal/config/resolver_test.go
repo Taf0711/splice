@@ -2115,6 +2115,72 @@ func TestResolveProjectConfigCannotSetWorktreesDirectory(t *testing.T) {
 	}
 }
 
+// TestResolvePluginHostExecutionIsUserOnly pins that plugins.<id>.hostExecution
+// comes from the user config only. A trusted project config cannot grant it,
+// and the setting survives a config write round trip.
+func TestResolvePluginHostExecutionIsUserOnly(t *testing.T) {
+	dir := t.TempDir()
+	userPath := filepath.Join(dir, "user.json")
+	projectPath := filepath.Join(dir, "project.json")
+	writeFileAt(t, userPath, `{"plugins":{"acme.notes":{"hostExecution":true}}}`)
+	writeFileAt(t, projectPath, `{"plugins":{"evil.repo":{"hostExecution":true},"acme.notes":{"hostExecution":false}}}`)
+
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath, ProjectTrusted: true, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if !resolved.Plugins["acme.notes"].HostExecution || len(resolved.Plugins) != 1 {
+		t.Fatalf("Plugins = %+v, want only the user opt-in for acme.notes", resolved.Plugins)
+	}
+
+	var cfg FileConfig
+	if err := json.Unmarshal([]byte(`{"plugins":{"acme.notes":{"hostExecution":true}}}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil || !strings.Contains(string(data), `"plugins":{"acme.notes":{"hostExecution":true}}`) {
+		t.Fatalf("round trip = %s, %v; want the plugins section kept", data, err)
+	}
+}
+
+// TestResolveAcceptNestedSandboxIsUserOnly: sandbox.acceptNestedSandbox comes
+// from the user config only. A trusted project config, a provider command, and
+// the environment cannot set it.
+func TestResolveAcceptNestedSandboxIsUserOnly(t *testing.T) {
+	dir := t.TempDir()
+	userPath := filepath.Join(dir, "user.json")
+	projectPath := filepath.Join(dir, "project.json")
+	writeFileAt(t, projectPath, `{"sandbox":{"acceptNestedSandbox":true}}`)
+	writeFileAt(t, userPath, `{}`)
+
+	resolved, err := Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath, ProjectTrusted: true, Env: map[string]string{"SPLICE_SANDBOX_ACCEPT_NESTED": "1"}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resolved.Sandbox.AcceptNestedSandbox {
+		t.Fatal("a trusted project config set sandbox.acceptNestedSandbox")
+	}
+	var command FileConfig
+	if err := json.Unmarshal([]byte(`{"sandbox":{"acceptNestedSandbox":true}}`), &command); err != nil {
+		t.Fatal(err)
+	}
+	var merged FileConfig
+	mergeConfig(&merged, command)
+	if merged.Sandbox.AcceptNestedSandbox {
+		t.Fatal("mergeConfig (the provider command path) copied sandbox.acceptNestedSandbox")
+	}
+
+	writeFileAt(t, userPath, `{"sandbox":{"acceptNestedSandbox":true}}`)
+	writeFileAt(t, projectPath, `{"sandbox":{"acceptNestedSandbox":false}}`)
+	resolved, err = Resolve(ResolveOptions{UserConfigPath: userPath, ProjectConfigPath: projectPath, ProjectTrusted: true, Env: map[string]string{}})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if !resolved.Sandbox.AcceptNestedSandbox {
+		t.Fatal("the user config sandbox.acceptNestedSandbox was not honored")
+	}
+}
+
 // Drift guard: every KeyBindingsConfig field must survive mergeKeyBindings. A new
 // field that is not copied fails here and names the field.
 func TestMergeKeyBindingsCopiesEveryField(t *testing.T) {

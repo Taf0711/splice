@@ -23,6 +23,9 @@ type FileChange struct {
 	Path       string `json:"path"`
 	Content    string `json:"content"`
 	ChangeType string `json:"change_type"` // create, modify, delete
+	// BaseDigest is the sha256 of the file bytes the change was composed on.
+	// Empty for full-content changes with no recorded base.
+	BaseDigest string `json:"base_digest,omitempty"`
 }
 
 // Validate checks that the file change is well-formed.
@@ -410,10 +413,27 @@ func (t TestRunnerInput) Validate() error {
 
 // TestCaseResult is the result for a single deterministic test case.
 type TestCaseResult struct {
+	// Name identifies the test. A Go test from `go test -json` has the
+	// package-qualified name "<import path>.<TestName>" when the event names
+	// its package, so the same test name in two packages stays two entries.
 	Name       string `json:"name"`
 	Status     string `json:"status"` // passed, failed, errored, skipped
 	DurationMs int    `json:"duration_ms"`
 	Message    string `json:"message,omitempty"`
+	// Package is the Go import path that qualifies Name. Empty for an entry
+	// that has no package (non-Go runners, suite and build entries).
+	Package string `json:"package,omitempty"`
+	// AlreadyFailing marks a failed or errored test that also failed in the
+	// pre-run baseline. It is not a new failure of the run.
+	AlreadyFailing bool `json:"already_failing,omitempty"`
+}
+
+// TestName returns the test name without its package qualifier.
+func (t TestCaseResult) TestName() string {
+	if t.Package == "" {
+		return t.Name
+	}
+	return strings.TrimPrefix(t.Name, t.Package+".")
 }
 
 // Validate checks the test case result.
@@ -426,11 +446,26 @@ func (t TestCaseResult) Validate() error {
 	default:
 		return fmt.Errorf("invalid test status %q", t.Status)
 	}
+	if t.AlreadyFailing && !t.failed() {
+		return fmt.Errorf("already_failing is valid only for a failed or errored test, got %q", t.Status)
+	}
 	if t.DurationMs < 0 {
 		return errors.New("duration_ms must be non-negative")
 	}
 	return nil
 }
+
+// Test evidence levels. They tell how much a test run proves.
+const (
+	// TestEvidencePerTest: the runner reported each test (go test -json).
+	TestEvidencePerTest = "per_test"
+	// TestEvidenceCommandOnly: only the exit code is known. A zero exit
+	// means the command succeeded, not that individual tests passed.
+	TestEvidenceCommandOnly = "command_only"
+	// TestEvidenceNone: no test evidence (no command, no tests ran, or a
+	// timeout).
+	TestEvidenceNone = "none"
+)
 
 // TestRunResults is deterministic test runner output.
 type TestRunResults struct {
@@ -440,6 +475,10 @@ type TestRunResults struct {
 	Stdout     string           `json:"stdout"`
 	Stderr     string           `json:"stderr"`
 	DurationMs int              `json:"duration_ms"`
+	// Evidence is the evidence level of Tests (TestEvidence*). The empty
+	// value is a result written before the field existed: consumers judge it
+	// by its entries only, and never treat it as command_only.
+	Evidence string `json:"evidence,omitempty"`
 }
 
 // Validate checks the test run results.
@@ -449,6 +488,14 @@ func (t TestRunResults) Validate() error {
 	}
 	if t.DurationMs < 0 {
 		return errors.New("duration_ms must be non-negative")
+	}
+	switch t.Evidence {
+	case "", TestEvidencePerTest, TestEvidenceCommandOnly, TestEvidenceNone:
+	default:
+		return fmt.Errorf("invalid test evidence %q", t.Evidence)
+	}
+	if t.Evidence == TestEvidenceCommandOnly && t.Passed() > 0 {
+		return errors.New("command_only evidence must not report passed tests")
 	}
 	for i, tc := range t.Tests {
 		if err := tc.Validate(); err != nil {
@@ -469,11 +516,12 @@ func (t TestRunResults) Passed() int {
 	return count
 }
 
-// Failed returns the number of failed or errored tests.
+// Failed returns the number of new failed or errored tests. A test that
+// already failed in the pre-run baseline is not counted; see FailedBefore.
 func (t TestRunResults) Failed() int {
 	count := 0
 	for _, tc := range t.Tests {
-		if tc.Status == "failed" || tc.Status == "errored" {
+		if tc.failed() && !tc.AlreadyFailing {
 			count++
 		}
 	}
@@ -485,4 +533,55 @@ func validateConfidence(c float64) error {
 		return fmt.Errorf("confidence %v must be between 0.0 and 1.0", c)
 	}
 	return nil
+}
+
+// FailedBefore returns the number of failed or errored tests that already
+// failed in the pre-run baseline. They are not counted by Failed.
+func (t TestRunResults) FailedBefore() int {
+	count := 0
+	for _, tc := range t.Tests {
+		if tc.failed() && tc.AlreadyFailing {
+			count++
+		}
+	}
+	return count
+}
+
+// Identity names a test across two runs. The package qualifies the name, so
+// the same test name in two Go packages is two tests.
+func (t TestCaseResult) Identity() string {
+	return t.Package + "\x00" + t.Name
+}
+
+// failed reports whether the test failed or errored.
+func (t TestCaseResult) failed() bool {
+	return t.Status == "failed" || t.Status == "errored"
+}
+
+// NewFailure reports whether the test failed or errored and the run caused
+// it. A failure that was already in the pre-run baseline is not new.
+func (t TestCaseResult) NewFailure() bool {
+	return t.failed() && !t.AlreadyFailing
+}
+
+// MarkAlreadyFailing marks each failed or errored test in results that failed
+// with the same status in baseline. It returns the number of tests marked. A
+// test that passed in the baseline, is absent from it, or changed its failure
+// kind (errored to failed, or failed to errored) stays new.
+func MarkAlreadyFailing(results *TestRunResults, baseline TestRunResults) int {
+	before := make(map[string]bool, len(baseline.Tests))
+	for _, tc := range baseline.Tests {
+		if tc.failed() {
+			before[tc.Identity()+"\x00"+tc.Status] = true
+		}
+	}
+	marked := 0
+	for i := range results.Tests {
+		tc := &results.Tests[i]
+		if tc.failed() && before[tc.Identity()+"\x00"+tc.Status] {
+			tc.AlreadyFailing = true
+			marked++
+		}
+	}
+	return marked
 }

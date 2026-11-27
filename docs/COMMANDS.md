@@ -15,6 +15,7 @@ splice <command> --help
 |---|---|
 | `splice` | Open the interactive TUI. |
 | `splice exec` | Run one prompt, a saved plan, or a stream request. |
+| `splice exec --design "<request>"` | Design the request, critique the plan, then run it. |
 | `splice pipeline` | List, show, use, export, import, or edit pipeline topologies. |
 | `splice daemon` | Manage the local background worker. |
 | `splice cron` | Manage local scheduled jobs. |
@@ -78,6 +79,13 @@ activity. Standard output does not change.
 The surface includes the pipeline viewer, which shows the live graph of the
 run. See [Pipeline behavior](PIPELINE.md#see-the-pipeline-in-a-browser).
 
+`--accept-nested-sandbox` applies to one run when Splice runs inside a
+sandbox. Stage commands, command nodes, and agent nodes then run under the
+outer sandbox, and the summary says that the stage sandbox was not enforced.
+Without the flag, these commands refuse to run. The user configuration key
+`sandbox.acceptNestedSandbox` gives the same permission for each run. See
+[Stage sandbox](PIPELINE.md#stage-sandbox).
+
 Use `--auto low` for conservative automation. Review the policy before you use
 `medium`, `high`, or `--skip-permissions-unsafe`.
 
@@ -92,6 +100,13 @@ Use `--auto low` for conservative automation. Review the policy before you use
 | `splice models` | List known models and capabilities. |
 | `splice auth` | Manage supported OAuth logins. |
 | `splice doctor` | Check configuration and provider health. |
+| `splice gc` | Remove stale temporary Go build caches and run directories. Add `--dry-run` to only report them. |
+
+Splice also removes these by itself, at most once an hour. A Go build cache that is not used for 7 days is removed, and the total stays under 10 GiB. Set `SPLICE_GOCACHE_MAX_GB` to change the limit, or `SPLICE_GC=off` to stop the automatic removal.
+
+The `pipeline.toolchain` check looks for `git`, `go`, `gosec`, `trivy`, `python`, `node`, and `npx` on PATH.
+A missing tool gives a warning, not a failure.
+A stage that needs a missing tool reports its check as incomplete, unavailable, or failed.
 
 Read [Configuration](CONFIGURATION.md) and
 [OAuth and provider login](oauth-subscriptions.md) before you add a custom
@@ -113,7 +128,7 @@ Run `splice changes --help` before a command that changes Git state.
 
 | Command | Purpose |
 |---|---|
-| `splice sessions` | List lineage, preview rewind, rewind, compact, or prune. |
+| `splice sessions` | List lineage, preview rewind, rewind, compact, or prune. Rewind restores only file-tool changes. Shell command changes are not restored. |
 | `splice search` | Search local session events. `splice find` is an alias. |
 | `splice spec` | Review and decide on saved specification drafts. |
 | `splice worktrees` | Prepare or prune isolated Git worktrees. |
@@ -186,7 +201,7 @@ uses its fixed stage and tool contracts. See [Pipeline behavior](PIPELINE.md).
 | Code | Meaning |
 |---:|---|
 | `0` | The run completed successfully. |
-| `2` | The command or input was invalid. This includes a topology that does not load or validate, and a node pin or stage route that does not resolve (also with `--plan`). Splice finds these before it sends a provider request. |
+| `2` | The command or input was invalid. This includes a topology that does not load or validate, and a node pin or stage route that does not resolve (also with `--plan` and `--design`). With `--design`, Splice checks the design stage routes and every pipeline stage route before it sends a provider request. |
 | `3` | Setup failed, so no stage result exists. Examples are the config, a provider that cannot start (also for a valid route), the sandbox, the stage registry, and the trajectory classifier. A failed `--loop` run also exits `3`. |
 | `4` | The pipeline ran, but the run ended without a complete result. This includes a stage that failed (also when its provider request failed), a trajectory stop, and the iteration or wall-time limit. The final result gives the reason. |
 | `130` | The user or process interrupted the run. |
@@ -237,7 +252,7 @@ commands work only in the interactive session.
 | `/init` | none | `/init` | Read the repository and create an `AGENTS.md` file for the agent. |
 | `/compact` | none | `/compact [status\|now]` | Compact the transcript now. `/compact status` shows the compaction state. |
 | `/transcript` | none | `/transcript` | Turn the detailed transcript view on or off. |
-| `/rewind` | none | `/rewind [latest\|<sequence>]` | Restore workspace files to a checkpoint. Remove the later session events. |
+| `/rewind` | none | `/rewind [latest\|<sequence>]` | Restore workspace files to a checkpoint. Remove the later session events. Only changes from `write_file`, `edit_file`, `delete_file`, and `apply_patch` are restored. Shell command changes are not restored. |
 | `/style` | none | `/style [list\|balanced\|concise\|explanatory\|review]` | Show or set the response style. |
 | `/selfcorrect` | `/sc` | `/selfcorrect [status\|on\|off\|tests\|full\|lsp]` | Show or set the depth of post-edit self-correction. |
 | `/turns` | none | `/turns [n]` | Show or set the tool-turn budget for each run in this session. Raise it for long tasks. |

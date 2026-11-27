@@ -41,9 +41,12 @@ almost certainly wrong.
    constructs the input struct, and invokes. Summaries flow forward, not raw
    outputs.
 
-3. **Information minimalism.** Each stage receives only what it needs. The
-   user's verbose original request never propagates past the orchestrator
-   (`DistillRequestIntent`).
+3. **Information minimalism.** Each stage receives only what it needs.
+   Stages whose model must read the task receive the request as written,
+   bounded at 32 KiB. These stages are the code writer, the test generator,
+   prompt nodes, repair passes, and the step-back advisor. All other stages,
+   and every key, summary, receipt, memory record, and stored trace, use the
+   distilled intent (`DistillRequestIntent`, 320 characters).
 
 4. **Local-first.** No required external services. SQLite (via the `splice-memd`
    sidecar) and the filesystem only.
@@ -186,7 +189,7 @@ splice/
     splice/                     # the deterministic pipeline layer
       schemas/                  # typed stage/pipeline/design/event/memory structs + Validate()
       classifier.go             # request -> tier, risk domains, rune-count thresholds
-      planner.go                # tier -> ExecutionPlan, DistillRequestIntent
+      planner.go                # tier -> ExecutionPlan, DistillRequestIntent, schemas.BoundRequest
       budget.go                 # per-tier stage token budgets
       trajectory.go             # iteration state vectors, scoring, trajectory decisions
       context.go                # deterministic ContextRequest fulfillment
@@ -238,6 +241,11 @@ Tests, evaluation campaigns, and splice runs leave files outside the
 repository. Remove them when the work that made them is complete. A full
 disk stops builds, and it can corrupt a running campaign.
 
+Splice removes its temporary Go caches automatically. It removes a cache
+that is not used for 7 days, and it keeps the cache total under 10 GiB.
+Run `splice gc` to run the collector now. Use `splice gc --dry-run` to
+list what it would remove.
+
 Before a long evaluation campaign:
 
 - Make sure that the disk has at least 50 GB free (`df -h`).
@@ -256,8 +264,8 @@ After a campaign, or at the end of a work session:
 3. Remove the campaign sidecar directories and binaries from `/tmp`.
 4. Trim the caches:
    - `$TMPDIR/splice/gocache`, the Go cache of the test runner stage.
-     Splice does not trim it. Remove the entries that are older than one
-     day.
+     Splice removes old entries automatically. Run `splice gc` to remove
+     them now.
    - The Go build cache: `go clean -cache` when it is large.
 5. Remove the temporary test directories in `$TMPDIR` (`Test*`,
    `splice-cli-test-sessions-*`, `go-build*`, `warmcost-seq-base-*`) that

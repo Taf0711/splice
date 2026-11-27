@@ -118,6 +118,7 @@ func Run(options Options) Report {
 	checks = append(checks, connectivityCheck(options.Provider, options.Connectivity, modelCheck.Status, options.ProviderHealth))
 	checks = append(checks, sandboxBackendCheck(options.GOOS, options.LookupExecutable, options.WorkspaceRoot, options.Sandbox))
 	checks = append(checks, lspServersCheck(options.LookupExecutable))
+	checks = append(checks, pipelineToolchainCheck(options.LookupExecutable))
 	checks = append(checks, storedKeyReachabilityCheck(options.Provider, options.UserConfig, options.OpenKeyStore))
 	if check, ok := experimentalFlagsCheck(options.Flags); ok {
 		checks = append(checks, check)

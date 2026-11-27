@@ -14,11 +14,16 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 )
 
 // RawFileReadToolName is the registry name of the raw source reader.
 const RawFileReadToolName = "raw_file_read"
+
+// rawFileReadMaxBytes is the largest file the exact reader returns. A larger
+// file is an error: the seam never returns partial bytes.
+const rawFileReadMaxBytes = 8 << 20
 
 type rawFileReadTool struct {
 	baseTool
@@ -81,6 +86,10 @@ func NewScopedRawFileReadTool(workspaceRoot string, scope PathScope) Tool {
 // identical on the host path; the model simply never gets the channel.
 func (tool rawFileReadTool) HostSeamOnly() bool { return true }
 
+// exactOutput implements exactOutputTool: the reader's bytes are never
+// reduced, truncated, or spilled.
+func (tool rawFileReadTool) exactOutput() {}
+
 func (tool rawFileReadTool) Run(ctx context.Context, args map[string]any) Result {
 	return tool.RunWithOptions(ctx, args, RunOptions{})
 }
@@ -96,9 +105,15 @@ func (tool rawFileReadTool) RunWithOptions(_ context.Context, args map[string]an
 		return errorResult("Error reading file " + requestedPath + ": " + err.Error())
 	}
 
+	if info, err := os.Stat(absolutePath); err == nil && info.Size() > rawFileReadMaxBytes {
+		return errorResult(fmt.Sprintf("Error reading file %s: file too large for an exact read (%d bytes, limit %d)", relativePath, info.Size(), rawFileReadMaxBytes))
+	}
 	content, err := os.ReadFile(absolutePath)
 	if err != nil {
 		return errorResult("Error reading file " + relativePath + ": " + err.Error())
+	}
+	if len(content) > rawFileReadMaxBytes {
+		return errorResult(fmt.Sprintf("Error reading file %s: file too large for an exact read (limit %d)", relativePath, rawFileReadMaxBytes))
 	}
 	// Record the whole-file baseline exactly as read_file does, so the
 	// read-before-write contract sees raw reads too.

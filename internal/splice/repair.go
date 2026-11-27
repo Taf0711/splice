@@ -292,15 +292,7 @@ func attemptLocalRepair(
 		}
 		fingerprint := FingerprintFromTestResults(results)
 		fingerprintHash := fingerprint.Hash()
-		var diagnostics strings.Builder
-		for _, tc := range results.Tests {
-			if tc.Status == "failed" || tc.Status == "errored" {
-				diagnostics.WriteString(tc.Name + ": " + tc.Message + "\n")
-			}
-		}
-		if raw := strings.TrimSpace(results.Stdout); raw != "" {
-			diagnostics.WriteString(raw + "\n")
-		}
+		diagnostics := repairDiagnostics(results)
 
 		repeatedNoEvidence, stalledCount := progress.observe(fingerprintHash, evidenceHashes(evidence), writerContentHashes(lastWriterOutput))
 		// Stop condition: the identical failure with no new evidence after
@@ -311,21 +303,22 @@ func attemptLocalRepair(
 			// retry: stop writing and surface the typed outcome.
 			emitStageEvent(options, iteration-1, testName, "message", fmt.Sprintf("%s: identical failure with no new evidence after %d repair(s); stopping repair loop", repairNoProgressReason, attempts), 0, nil)
 			return false, &schemas.InteractionRecord{
-				Message:   lastMessage,
-				Iteration: iteration,
-				Repairs:   attempts,
-				Resolved:  false,
-				LatencyMs: totalLatency,
+				Message:          lastMessage,
+				Iteration:        iteration,
+				Repairs:          attempts,
+				Resolved:         false,
+				LatencyMs:        totalLatency,
+				RepairNoProgress: true,
 			}, nil
 		}
 
 		// A4: deterministic diagnostic resolution over the workspace.
-		resolverEvidence := ResolveGoDiagnostics(workDir, diagnostics.String())
+		resolverEvidence := ResolveGoDiagnostics(workDir, diagnostics)
 
 		// A5: focused payload. Original intent, change summary, exact
 		// failure, fingerprint, resolver evidence, attempted approaches, and
 		// (on the final attempt) the no-progress constraint. No transcript.
-		instruction := repairInstructionDirection(names, diagnostics.String(), lastWriterOutput)
+		instruction := repairInstructionDirection(names, diagnostics, lastWriterOutput)
 		revisionContext := buildFocusedRevisionContext(focusedRepairPayload{
 			Intent:           plan.RequestIntent,
 			ChangeSummary:    changeSummaryForStage(*priorSummaries, writerName),
@@ -369,8 +362,11 @@ func attemptLocalRepair(
 		if selErr != nil {
 			return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", selErr)
 		}
-		writerOutput, werr := runRepairStage(ctx, wallDeadline, writerInput, codeWriterStage, iteration, writerSelection, options, workDir, runner, mem, writerCaps, stageBudgetByName(plan, writerName), plan.Tier, tr, repairScope, repairN, &writerScope, execBudget)
+		writerEvidence := newSandboxEvidenceCollector(writerName, iteration)
+		writerEvidence.nestedAccepted = options.nestedSandboxAccepted()
+		writerOutput, werr := runRepairStage(withSandboxEvidence(ctx, writerEvidence), wallDeadline, writerInput, codeWriterStage, iteration, writerSelection, options, workDir, runner, mem, writerCaps, stageBudgetByName(plan, writerName), plan.Tier, tr, repairScope, repairN, &writerScope, execBudget)
 		totalLatency += int(time.Since(writerStart).Milliseconds())
+		attachRepairEvidence(records, iteration, writerName, writerEvidence)
 		if werr != nil {
 			if ctx.Err() != nil || errors.Is(werr, context.Canceled) || errors.Is(werr, errWallTimeExceeded) {
 				return false, nil, fmt.Errorf("repair: code_writer re-entry: %w", werr)
@@ -427,6 +423,7 @@ func attemptLocalRepair(
 				}
 			}
 		}
+		writerOutput.Stage = writerName
 		*outputs = append(*outputs, writerOutput)
 		lastWriterOutput = writerOutput
 		progress.recordApproach(DerefString(mergedWriter.OutputSummary))
@@ -437,12 +434,16 @@ func attemptLocalRepair(
 		// WHY a second test_runner run exists mid-iteration.
 		emitStageEvent(options, iteration-1, testName, "message", fmt.Sprintf("repair re-entry %d: re-running tests", attempts), 0, nil)
 		testInput := repairStageInput(runID, testName, plan, stageNames, *priorSummaries, *priorChangedFiles, nil)
+		testInput.RunChangedFiles = runChangedByStage(options.runChanged, *outputs)
 		testStart := time.Now()
 		var runnerScope *StageScopePlan
 		testPlanStage, _ := stageByPlanName(plan, testName)
 		testCaps := effectiveCaps(testPlanStage, testRunnerStage.Capabilities())
-		newTestOutput, terr := runRepairStage(ctx, wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, testCaps, stageBudgetByName(plan, testName), plan.Tier, tr, repairScope, repairN, &runnerScope, execBudget)
+		testEvidence := newSandboxEvidenceCollector(testName, iteration)
+		testEvidence.nestedAccepted = options.nestedSandboxAccepted()
+		newTestOutput, terr := runRepairStage(withSandboxEvidence(ctx, testEvidence), wallDeadline, testInput, testRunnerStage, iteration, agent.ModelSelection{}, options, workDir, runner, mem, testCaps, stageBudgetByName(plan, testName), plan.Tier, tr, repairScope, repairN, &runnerScope, execBudget)
 		totalLatency += int(time.Since(testStart).Milliseconds())
+		attachRepairEvidence(records, iteration, testName, testEvidence)
 		if terr != nil {
 			return false, nil, fmt.Errorf("repair: test_runner re-run: %w", terr)
 		}
@@ -465,6 +466,7 @@ func attemptLocalRepair(
 				*outputs = slices.Delete(*outputs, idx, idx+1)
 			}
 		}
+		newTestOutput.Stage = testName
 		*outputs = append(*outputs, newTestOutput)
 		currentOutput = newTestOutput
 
@@ -567,22 +569,41 @@ func attemptLocalRepair(
 	}, nil
 }
 
+// repairDiagnostics is the failure text a repair pass reads. It lists the new
+// failures only. The raw output joins it only when no failure predates the
+// run, because the raw output may still hold the failures that predate it.
+func repairDiagnostics(results schemas.TestRunResults) string {
+	var diagnostics strings.Builder
+	for _, tc := range results.Tests {
+		if tc.NewFailure() {
+			diagnostics.WriteString(tc.Name + ": " + tc.Message + "\n")
+		}
+	}
+	if raw := strings.TrimSpace(results.Stdout); raw != "" && results.FailedBefore() == 0 {
+		diagnostics.WriteString(raw + "\n")
+	}
+	return diagnostics.String()
+}
+
 // extractFailingTests returns the "Name: Message" evidence strings (message
-// truncated to 200 chars) and the bare names, capped at 10 failures.
+// truncated to 200 chars) and the bare names, capped at 10 failures. The
+// evidence keeps the package-qualified name; the bare names drop the package
+// so they match test declarations.
 func extractFailingTests(results schemas.TestRunResults) (evidence []string, names []string) {
 	for _, tc := range results.Tests {
-		if tc.Status != "failed" && tc.Status != "errored" {
+		if !tc.NewFailure() {
 			continue
 		}
 		if len(names) >= 10 {
 			break
 		}
-		entry := tc.Name
+		name := stages.BoundEntryName(tc.Name)
+		entry := name
 		if message := strings.TrimSpace(tc.Message); message != "" {
-			entry = tc.Name + ": " + truncateString(message, 200)
+			entry = name + ": " + truncateString(message, 200)
 		}
 		evidence = append(evidence, entry)
-		names = append(names, tc.Name)
+		names = append(names, stages.BoundEntryName(tc.TestName()))
 	}
 	return evidence, names
 }
@@ -696,6 +717,7 @@ func repairStageInput(runID, stageName string, plan schemas.ExecutionPlan, stage
 		Sequence:          sequence,
 		PlanTier:          plan.Tier,
 		RequestIntent:     plan.RequestIntent,
+		Request:           plan.Request,
 		AcceptanceFacts:   append([]schemas.AcceptanceFact(nil), plan.AcceptanceFacts...),
 		PriorSummaries:    withRoleAlias(maps.Clone(priorSummaries), plan, "code_writer"),
 		PriorChangedFiles: withRoleAlias(cloneChangedFiles(priorChangedFiles), plan, "code_writer"),
@@ -883,6 +905,19 @@ func addRepairUsage(records *[]schemas.StageRecord, iteration int, stageName str
 		return *rec, true
 	}
 	return schemas.StageRecord{}, false
+}
+
+// attachRepairEvidence adds the sandbox evidence of a repair re-entry to the
+// stage record of the pass, so the record lists every spawn of the stage in
+// the iteration. Both re-entered stages (writer and test runner) already
+// have a record in the pass when a repair starts.
+func attachRepairEvidence(records *[]schemas.StageRecord, iteration int, stageName string, collector *sandboxEvidenceCollector) {
+	for i := range *records {
+		if rec := &(*records)[i]; rec.Name == stageName && rec.Iteration == iteration {
+			collector.attach(rec)
+			return
+		}
+	}
 }
 
 func mergeRepairRecord(records *[]schemas.StageRecord, iteration int, stageName string, output schemas.HarnessStageOutput, modelFree bool) schemas.StageRecord {

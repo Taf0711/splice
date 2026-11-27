@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
@@ -426,6 +427,40 @@ var trajectoryExtractors = map[string]trajectoryExtractor{
 	},
 }
 
+// acceptanceFailureSignatures returns the sorted "status\x00name" keys of the
+// acceptance checks that failed or errored in one pass. It is empty when no
+// check failed.
+func acceptanceFailureSignatures(outputs []schemas.HarnessStageOutput) ([]string, error) {
+	signals, err := extractIterationSignals(outputs)
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, results := range signals.acceptanceResults {
+		for _, result := range results {
+			if result.Status == "failed" || result.Status == "errored" {
+				keys = append(keys, result.Status+"\x00"+result.Name)
+			}
+		}
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+// acceptanceFirstStatement returns the statement of a signature key, cut to
+// 160 bytes at a rune boundary.
+func acceptanceFirstStatement(key string) string {
+	_, name, _ := strings.Cut(key, "\x00")
+	if len(name) <= 160 {
+		return name
+	}
+	cut := 160
+	for cut > 0 && !utf8.RuneStart(name[cut]) {
+		cut--
+	}
+	return name[:cut]
+}
+
 func extractIterationSignals(outputs []schemas.HarnessStageOutput) (iterationSignals, error) {
 	var dest iterationSignals
 	keys := make([]string, 0, len(trajectoryExtractors))
@@ -463,6 +498,7 @@ func ComputeIterationState(iteration int, stageOutputs []schemas.HarnessStageOut
 		TestsPassing:             countTests(signals.testResults, "passed"),
 		TestsFailing:             countTests(signals.testResults, "failed"),
 		TestsErrored:             countTests(signals.testResults, "errored"),
+		TestsAlreadyFailing:      countAlreadyFailing(signals.testResults),
 		Preexisting:              preexisting,
 		Authored:                 authored,
 		AcceptanceFactsPassing:   countAcceptanceResults(signals.acceptanceResults, "passed"),
@@ -547,14 +583,26 @@ func strictlyDecreasing(values []float64) bool {
 	return true
 }
 
+// countTests counts the tests with status. A failure that was already in the
+// baseline is left out, so it never counts as a failure of this run.
 func countTests(results []schemas.TestRunResults, status string) int {
 	count := 0
 	for _, result := range results {
 		for _, tc := range result.Tests {
-			if tc.Status == status {
+			if tc.Status == status && !tc.AlreadyFailing {
 				count++
 			}
 		}
+	}
+	return count
+}
+
+// countAlreadyFailing counts the failed or errored tests that were already
+// failing before the run.
+func countAlreadyFailing(results []schemas.TestRunResults) int {
+	count := 0
+	for _, result := range results {
+		count += result.FailedBefore()
 	}
 	return count
 }
@@ -577,7 +625,7 @@ func splitTestCounts(results []schemas.TestRunResults, authoredFiles []schemas.F
 	authoredNames := authoredFuncNames(authoredFiles)
 	for _, result := range results {
 		for _, tc := range result.Tests {
-			name := topLevelTestName(tc.Name)
+			name := topLevelTestName(tc.TestName())
 			counts := &preexisting
 			if _, ok := authoredNames[name]; ok {
 				counts = &authored
@@ -737,13 +785,16 @@ func tokensConsumed(records []schemas.StageRecord) int {
 	return total
 }
 
-// tokensGenerated sums output-side spend only (completion plus reasoning;
-// reasoning is already a subset of TokensOutput). The trajectory budget gates
-// on this, not on input-inclusive consumption.
+// tokensGenerated sums visible output: TokensOutput minus TokensReasoning for
+// each record. Reasoning tokens are a subset of TokensOutput, so they are
+// excluded here. The per-request output cap already bounds them. A record
+// with more reasoning than output (bad provider data) counts 0, never a
+// negative value. A provider that reports no reasoning split keeps
+// TokensReasoning 0 and counts its full output.
 func tokensGenerated(records []schemas.StageRecord) int {
 	total := 0
 	for _, record := range records {
-		total += record.TokensOutput
+		total += max(0, record.TokensOutput-record.TokensReasoning)
 	}
 	return total
 }

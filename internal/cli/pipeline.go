@@ -50,6 +50,17 @@ func runPipelineCommand(args []string, stdout, stderr io.Writer) int {
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, pipelineUsage)
 		return 0
+	case "list", "show", "use", "export", "import":
+		// -h and --help print the usage before the subcommand runs. edit prints
+		// its own usage line.
+		for _, arg := range args[1:] {
+			if arg == "-h" || arg == "--help" {
+				fmt.Fprint(stdout, pipelineUsage)
+				return 0
+			}
+		}
+	}
+	switch args[0] {
 	case "list":
 		return runPipelineList(stdout, stderr)
 	case "show":
@@ -61,7 +72,7 @@ func runPipelineCommand(args []string, stdout, stderr io.Writer) int {
 	case "import":
 		return runPipelineImport(args[1:], stdout, stderr)
 	case "edit":
-		return runPipelineEdit(args[1:], stderr)
+		return runPipelineEdit(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown pipeline subcommand %q\n\n%s", args[0], pipelineUsage)
 		return 2
@@ -402,12 +413,34 @@ func promptYesNo(reader io.Reader, w io.Writer, prompt string) bool {
 // Ctrl-C. Tests replace it.
 var pipelineEditContext = signalContext
 
+// editorUse makes a library entry active for the editor's Use action.
+func editorUse(root string, trusted bool) func(name string) (string, error) {
+	return func(name string) (string, error) {
+		topology, path, err := splicerun.ActivateLibraryPipeline(name)
+		if err != nil {
+			return "", err
+		}
+		text := fmt.Sprintf("Active pipeline: %s (%s). It applies from the next run.", topology.Name, path)
+		// A trusted project file outranks the library entry, so it still wins.
+		if _, source, _, rerr := splicerun.ResolveTopology(splicerun.TopologySourcesFor(root, trusted)); rerr == nil && source == splicerun.TopologySourceProject {
+			text += " A trusted " + splicerun.TopologySourceProject + " still outranks it."
+		}
+		return text, nil
+	}
+}
+
 // runPipelineEdit serves the browser editor for a headless user. It opens a
 // draft of the library entry name, a copy of the embedded default, or with
 // no name the active topology. It resumes the latest draft of that source;
 // --new starts a fresh one. The one-time link goes to stderr.
 // The server runs until Ctrl-C or until it is idle for the idle timeout.
-func runPipelineEdit(args []string, stderr io.Writer) int {
+func runPipelineEdit(args []string, stdout, stderr io.Writer) int {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			fmt.Fprint(stdout, "usage: splice pipeline edit [--new] [name|default]\n")
+			return 0
+		}
+	}
 	ref, fresh, err := web.ParseEditArgs(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "pipeline edit: %v\nusage: splice pipeline edit [--new] [name|default]\n", err)
@@ -421,13 +454,7 @@ func runPipelineEdit(args []string, stderr io.Writer) int {
 	editor := web.NewEditor(web.EditorConfig{
 		Sources: splicerun.TopologySourcesFor(root, workspaceTrusted(root)),
 		Models:  editorModelChoices(root),
-		Use: func(name string) (string, error) {
-			topology, path, err := splicerun.ActivateLibraryPipeline(name)
-			if err != nil {
-				return "", err
-			}
-			return fmt.Sprintf("Active pipeline: %s (%s). It applies from the next run.", topology.Name, path), nil
-		},
+		Use:     editorUse(root, workspaceTrusted(root)),
 	})
 	id, err := editor.OpenDraft(ref, fresh)
 	if err != nil {

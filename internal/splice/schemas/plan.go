@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
+	"unicode/utf8"
 )
 
 // PipelineTier is a request complexity tier.
@@ -415,8 +417,11 @@ func (e ExecutionStage) Validate() error {
 
 // ExecutionPlan is the DAG plan produced by the orchestrator.
 type ExecutionPlan struct {
-	Tier                   PipelineTier     `json:"tier"`
-	RequestIntent          string           `json:"request_intent"`
+	Tier          PipelineTier `json:"tier"`
+	RequestIntent string       `json:"request_intent"`
+	// Request is the full task text for the model stages, bounded by
+	// MaxRequestBytes. RequestIntent stays the distilled key value.
+	Request                string           `json:"request,omitempty"`
 	Stages                 []ExecutionStage `json:"stages"`
 	TokenBudget            TokenBudget      `json:"token_budget"`
 	AcceptanceFacts        []AcceptanceFact `json:"acceptance_facts,omitempty"`
@@ -507,7 +512,10 @@ type StageRecord struct {
 	// FailureKind classifies a failed stage for the trajectory monitor. Empty
 	// for a stage that did not fail. The closed set is NodeFailureStageError,
 	// NodeFailureTestFailure, and NodeFailureNone.
-	FailureKind       string  `json:"failure_kind,omitempty"`
+	FailureKind string `json:"failure_kind,omitempty"`
+	// RepairNoProgress is true on the test_runner record of an iteration whose
+	// repair loop stopped with repair_no_progress. The pass loop ends the run.
+	RepairNoProgress  bool    `json:"repair_no_progress,omitempty"`
 	Activity          *string `json:"activity,omitempty"`
 	TokensInput       int     `json:"tokens_input"`
 	TokensOutput      int     `json:"tokens_output"`
@@ -524,6 +532,12 @@ type StageRecord struct {
 	// review to the same {stage, iteration} record. Legacy traces without the
 	// field remain valid: it is optional and additive.
 	MemoryReviews []MemoryReview `json:"memory_reviews,omitempty"`
+	// SandboxEvidence records the command spawns of the stage in spawn order,
+	// at most MaxSandboxEvidencePerStage. SandboxEvidenceDropped counts the
+	// spawns past that bound. The record is for the user and for audit; it is
+	// never part of a model prompt.
+	SandboxEvidence        []SandboxEvidence `json:"sandbox_evidence,omitempty"`
+	SandboxEvidenceDropped int               `json:"sandbox_evidence_dropped,omitempty"`
 }
 
 // Validate checks the stage record.
@@ -534,6 +548,20 @@ func (s StageRecord) Validate() error {
 	for i := range s.MemoryReviews {
 		if err := s.MemoryReviews[i].Validate(); err != nil {
 			return fmt.Errorf("memory_reviews[%d]: %w", i, err)
+		}
+	}
+	if len(s.SandboxEvidence) > MaxSandboxEvidencePerStage {
+		return fmt.Errorf("sandbox_evidence has %d entries, the limit is %d", len(s.SandboxEvidence), MaxSandboxEvidencePerStage)
+	}
+	if s.SandboxEvidenceDropped < 0 {
+		return errors.New("sandbox_evidence_dropped must be non-negative")
+	}
+	for i, evidence := range s.SandboxEvidence {
+		if err := evidence.Validate(); err != nil {
+			return fmt.Errorf("sandbox_evidence[%d]: %w", i, err)
+		}
+		if evidence.Stage != s.Name || evidence.Iteration != s.Iteration {
+			return fmt.Errorf("sandbox_evidence[%d] names stage %s iteration %d, the record is %s iteration %d", i, evidence.Stage, evidence.Iteration, s.Name, s.Iteration)
 		}
 	}
 	switch s.Status {
@@ -579,16 +607,23 @@ func (s StageRecord) Validate() error {
 
 // HarnessStageInput is minimal typed input passed through the harness runner.
 type HarnessStageInput struct {
-	RunID           string            `json:"run_id"`
-	StageName       string            `json:"stage_name"`
-	Sequence        int               `json:"sequence"`
-	PlanTier        PipelineTier      `json:"plan_tier"`
-	RequestIntent   string            `json:"request_intent"`
+	RunID         string       `json:"run_id"`
+	StageName     string       `json:"stage_name"`
+	Sequence      int          `json:"sequence"`
+	PlanTier      PipelineTier `json:"plan_tier"`
+	RequestIntent string       `json:"request_intent"`
+	// Request is the full task text for the model stages. Empty on plans
+	// built before it existed, and then the stages use RequestIntent.
+	Request         string            `json:"request,omitempty"`
 	AcceptanceFacts []AcceptanceFact  `json:"acceptance_facts,omitempty"`
 	PriorSummaries  map[string]string `json:"prior_summaries,omitempty"`
 	// PriorChangedFiles carries structured paths from completed earlier stages.
 	// It complements PriorSummaries, which remains the prose hand-off channel.
 	PriorChangedFiles map[string][]string `json:"prior_changed_files,omitempty"`
+	// RunChangedFiles maps each earlier stage of the run to the paths it
+	// changed, edge scope aside. Only the test runner reads it, to expand the
+	// configured {tests} placeholder. Models never see it.
+	RunChangedFiles map[string][]string `json:"run_changed_files,omitempty"`
 	// WriterStage is the plan name of the code writer when a topology renames
 	// it. Empty means the builtin name. Stages show it to the model, so it is
 	// the name the model sees.
@@ -673,6 +708,10 @@ type HarnessStageOutput struct {
 	// legacy Data keys, and stageChangedFiles prefers this field.
 	ChangedFiles []string    `json:"changed_files,omitempty"`
 	Usage        *StageUsage `json:"-"`
+	// Stage is the plan stage that produced the output. The orchestrator
+	// sets it when it keeps the output for the pass; a stage never sets it.
+	// It is not serialized.
+	Stage string `json:"-"`
 }
 
 // Validate checks the harness stage output.
@@ -900,6 +939,17 @@ func (r PipelineUsageRecord) Validate() error {
 	return nil
 }
 
+// Verification outcomes of a completed run.
+const (
+	// VerificationOutcomeVerified: a check passed with real evidence.
+	VerificationOutcomeVerified = "verified"
+	// VerificationOutcomeCommandPassed: the test command exited 0 but
+	// reported no per-test evidence. The run is not verified.
+	VerificationOutcomeCommandPassed = "command_passed"
+	// VerificationOutcomeUnverified: no check verified the run.
+	VerificationOutcomeUnverified = "unverified"
+)
+
 // PipelineResult is the final pipeline result returned by the CLI.
 type PipelineResult struct {
 	RunID  string       `json:"run_id"`
@@ -935,6 +985,21 @@ type PipelineResult struct {
 	// UnverifiedReason names why a completed run is not verified: which checks
 	// did not apply. Empty when Verified is true.
 	UnverifiedReason string `json:"unverified_reason,omitempty"`
+	// VerificationOutcome is the typed verification state of a completed run
+	// (VerificationOutcome*). It is empty for a run that did not complete and
+	// for results written before the field existed. Verified stays the
+	// boolean truth: it is true only for the "verified" outcome.
+	VerificationOutcome string `json:"verification_outcome,omitempty"`
+	// VerificationChecks lists each verification-relevant stage of the final
+	// pass with its outcome, so a verified result names what verified it. It
+	// is empty for a run that did not complete and for results written before
+	// the field existed.
+	VerificationChecks []VerificationCheck `json:"verification_checks,omitempty"`
+	// NestedSandboxAccepted marks a run in which Splice already ran inside a
+	// sandbox and the user accepted a nested run: stage commands, command
+	// nodes, and agent nodes ran under the outer sandbox only, not under the
+	// stage sandbox. It does not change verification.
+	NestedSandboxAccepted bool `json:"nested_sandbox_accepted,omitempty"`
 	// UserAborted marks an aborted run the USER chose to stop. It is set
 	// only at the site that applies a user abort decision. Every other
 	// aborted run is an internal stop (max iterations, wall time, rollback
@@ -976,6 +1041,21 @@ func (p PipelineResult) Validate() error {
 	}
 	if p.TotalTokensInput < 0 || p.TotalTokensOutput < 0 || p.TotalTokensCached < 0 || p.TotalTokensCacheWrite < 0 || p.TotalTokensReasoning < 0 {
 		return errors.New("token counts must be non-negative")
+	}
+	switch p.VerificationOutcome {
+	case "":
+	case VerificationOutcomeVerified, VerificationOutcomeCommandPassed, VerificationOutcomeUnverified:
+		if p.Status != "completed" {
+			return fmt.Errorf("verification_outcome %q requires status completed, got %q", p.VerificationOutcome, p.Status)
+		}
+		if p.Verified != (p.VerificationOutcome == VerificationOutcomeVerified) {
+			return fmt.Errorf("verification_outcome %q contradicts verified=%v", p.VerificationOutcome, p.Verified)
+		}
+	default:
+		return fmt.Errorf("invalid verification_outcome %q", p.VerificationOutcome)
+	}
+	if err := ValidateVerificationChecks(p.VerificationChecks, p.Verified); err != nil {
+		return err
 	}
 	if p.MergeStatus != nil {
 		switch *p.MergeStatus {
@@ -1036,4 +1116,61 @@ func (p PipelineResult) Validate() error {
 		return fmt.Errorf("cost_coverage %q must be %q", p.CostCoverage, wantCoverage)
 	}
 	return nil
+}
+
+// MaxRequestBytes bounds the full task text a plan and its stages carry.
+const MaxRequestBytes = 32 << 10
+
+// requestTruncatedMarker ends a request that BoundRequest cut.
+const requestTruncatedMarker = "\n[request truncated at 32 KiB]"
+
+// fenceClose closes a code fence that a cut leaves open.
+const fenceClose = "\n```"
+
+// BoundRequest returns the task text the model stages read. A request within
+// MaxRequestBytes is returned unchanged, with its whitespace and code fences.
+// A longer one is cut at a rune boundary. A cut inside a code fence closes the
+// fence. The result ends with requestTruncatedMarker.
+func BoundRequest(request string) string {
+	if len(request) <= MaxRequestBytes {
+		return request
+	}
+	cut := MaxRequestBytes - len(requestTruncatedMarker) - len(fenceClose)
+	for cut > 0 && !utf8.RuneStart(request[cut]) {
+		cut--
+	}
+	kept := request[:cut]
+	if insideFence(kept) {
+		return kept + fenceClose + requestTruncatedMarker
+	}
+	return kept + requestTruncatedMarker
+}
+
+// insideFence reports whether text ends inside an open ``` code fence.
+func insideFence(text string) bool {
+	open := false
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			open = !open
+		}
+	}
+	return open
+}
+
+// TaskText is the task text a model stage reads: the full request when the
+// plan carries one, else the distilled intent (plans built before Request).
+func (e ExecutionPlan) TaskText() string {
+	if e.Request != "" {
+		return e.Request
+	}
+	return e.RequestIntent
+}
+
+// TaskText is the task text a model stage reads: the full request when the
+// orchestrator carried it, else the distilled intent.
+func (h HarnessStageInput) TaskText() string {
+	if h.Request != "" {
+		return h.Request
+	}
+	return h.RequestIntent
 }

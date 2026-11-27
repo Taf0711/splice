@@ -1,10 +1,13 @@
 package stages
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -42,7 +45,7 @@ func (o StageOptions) contextRequest(intent, evidence string) *schemas.ContextRe
 		return o.OverrideContextRequest
 	}
 	if o.PullContext {
-		req := defaultContextRequestWithEvidence(intent, evidence, o.WorkDir, o.Language)
+		req := defaultContextRequestCarried(intent, evidence, o.WorkDir, o.Language, o.CarriedQueries, nil)
 		return &req
 	}
 	return nil
@@ -69,10 +72,6 @@ func defaultContextRequest(intent string, workDir string, language string) schem
 	return defaultContextRequestPreferring(intent, "", workDir, language, nil)
 }
 
-func defaultContextRequestWithEvidence(intent, evidence, workDir, language string) schemas.ContextRequest {
-	return defaultContextRequestPreferring(intent, evidence, workDir, language, nil)
-}
-
 // languageManifests are the small project files that name the module or
 // package. The writer needs the module name to write correct imports.
 var languageManifests = map[string][]string{
@@ -86,7 +85,7 @@ var languageManifests = map[string][]string{
 // the workspace's test files join the initial reads.
 var testMentionPattern = regexp.MustCompile(`(?i)\btests?\b|_test\.|table-driven|\bspec\b`)
 
-// defaultContextRequestWithEvidence is the initial context rule (D0 of
+// defaultContextRequestPreferring is the initial context rule (D0 of
 // plans/SPEC_JEV_DECISION_LAYER_2026-09-25.md). On the recorded campaigns,
 // 116 of 124 first context expansions asked for an existing file that the
 // old rule did not deliver: a request that named one path read only that
@@ -102,6 +101,14 @@ var testMentionPattern = regexp.MustCompile(`(?i)\btests?\b|_test\.|table-driven
 //   - Test files are read only when the request talks about tests. Otherwise
 //     they stay out: a repair-loop fixture can plant a trap test.
 func defaultContextRequestPreferring(intent, evidence, workDir, language string, preferred []string) schemas.ContextRequest {
+	return defaultContextRequestCarried(intent, evidence, workDir, language, nil, preferred)
+}
+
+// defaultContextRequestCarried is the default request with the files a
+// previous invocation of the stage fetched (carried). Carried files come
+// after the named and evidence paths and before the ranked fallback. They
+// never turn the fallback off: it still runs when nothing is named.
+func defaultContextRequestCarried(intent, evidence, workDir, language string, carried []schemas.ContextQuery, preferred []string) schemas.ContextRequest {
 	queries := []schemas.ContextQuery{
 		{QueryType: schemas.ContextListFiles, MaxResults: defaultListMaxResults, MaxChars: 10000},
 	}
@@ -135,11 +142,29 @@ func defaultContextRequestPreferring(intent, evidence, workDir, language string,
 		add(path)
 		evidenceReads++
 	}
+	// The fallback runs only when the request names no path. Carried paths
+	// are not named paths, so they do not turn it off.
+	fallback := len(readPaths) == 0
+	carriedReads := map[string]schemas.ContextQuery{}
+	for _, q := range carried {
+		if q.Path == nil {
+			continue
+		}
+		path := strings.TrimPrefix(*q.Path, "./")
+		if !workspaceFileExists(workDir, path) {
+			continue
+		}
+		if _, seen := carriedReads[path]; !seen {
+			q.Path = &path
+			carriedReads[path] = q
+		}
+		add(path)
+	}
 	// The sources the request points to (its package, its identifiers)
 	// come before memory's files: memory adds to what the request names and
 	// never displaces it. P1e: memory's files replaced this ranking, and
 	// warm reads needed 0.3 to 0.4 more expansion rounds than cold.
-	if len(readPaths) == 0 {
+	if fallback {
 		for _, path := range rankedSourceMatches(workDir, language, intent, maxFallbackSourceFiles) {
 			add(path)
 		}
@@ -149,14 +174,8 @@ func defaultContextRequestPreferring(intent, evidence, workDir, language string,
 			add(path)
 		}
 	}
-	if len(readPaths) == 0 {
-		for _, path := range productionSourcePaths(workDir, language) {
-			add(path)
-		}
-	} else if sources := sourcePaths(workDir, language, false, maxFallbackSourceFiles+1); len(sources) <= maxFallbackSourceFiles {
-		for _, path := range sources {
-			add(path)
-		}
+	for _, path := range allSourcesIfFew(workDir, language) {
+		add(path)
 	}
 	for _, manifest := range languageManifests[strings.ToLower(strings.TrimSpace(language))] {
 		if workspaceFileExists(workDir, manifest) {
@@ -169,6 +188,10 @@ func defaultContextRequestPreferring(intent, evidence, workDir, language string,
 		}
 	}
 	for _, path := range readPaths {
+		if granted, ok := carriedReads[path]; ok {
+			queries = append(queries, granted)
+			continue
+		}
 		queries = append(queries, schemas.ContextQuery{
 			QueryType:  schemas.ContextReadFile,
 			Path:       &path,
@@ -195,111 +218,304 @@ func workspaceFileExists(workDir, path string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-// productionSourcePaths lists up to maxFallbackSourceFiles workspace-relative
-// production source paths for the detected language. Test files are excluded,
-// hidden and dependency directories are skipped, and the result is sorted for
-// deterministic context bundles.
-func productionSourcePaths(workDir string, language string) []string {
-	return sourcePaths(workDir, language, false, maxFallbackSourceFiles)
+// allSourcesIfFew returns every production source when they fit the fallback
+// bound, and nil otherwise. A large workspace gets no arbitrary slice of its
+// sources: a request that matches no file reads none of them.
+func allSourcesIfFew(workDir string, language string) []string {
+	sources := sourcePaths(workDir, language, false, maxFallbackSourceFiles+1)
+	if len(sources) > maxFallbackSourceFiles {
+		return nil
+	}
+	return sources
 }
 
 // Bounds for ranking the fallback sources: a large workspace is not scanned
 // in full, and one large file is read only in part.
 const (
 	maxRankedSourceFiles = 2000
-	maxRankedFileBytes   = 64 << 10
+	maxRankedFileBytes   = 512 << 10
+	// A token counts only when at most this share of candidate files holds
+	// it, and never when fewer than rankedMinDocFreq files would be allowed.
+	rankedMaxDocShare = 0.05
+	rankedMinDocFreq  = 3
+	// A directory word adds this much, divided by the document-frequency
+	// limit. That is always below one distinctive hit (1/df), so a directory
+	// alone never outranks a file that holds a request identifier.
+	rankedDirWeight = 0.5
 )
 
 var (
-	intentIdentifierPattern = regexp.MustCompile(`\b[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*\b`)
 	intentWordPattern       = regexp.MustCompile(`\b[a-z][a-z0-9_]{2,}\b`)
-	// A sentence's first word ("Add", "Reuse") is capitalized, not an
-	// identifier, and common method names would match it.
-	sentenceStartPattern = regexp.MustCompile(`(^|[.!?:]\s+)[A-Z][a-z]+\b`)
+	intentIdentifierPattern = regexp.MustCompile(`\b[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*\b`)
+	// Code spans: fenced blocks and inline backtick text.
+	codeSpanPattern = regexp.MustCompile("(?s)```.*?```|`[^`\n]+`")
+	// identWordPattern matches a dotted or plain identifier.
+	identWordPattern = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_.]*`)
+	// callNamePattern matches a name followed by an opening parenthesis.
+	callNamePattern = regexp.MustCompile(`([A-Za-z_][A-Za-z0-9_.]*)\(`)
+	// camelWordPattern matches a CamelCase word with an inner capital.
+	camelWordPattern = regexp.MustCompile(`^(?:[a-z][A-Za-z0-9]*[A-Z]|[A-Z][a-z0-9]*[A-Z])[A-Za-z0-9]*$`)
 )
 
-// rankedSourcePaths is the fallback when the request names no file. The
-// request usually names its package ("in the billing package") and the
-// identifiers it uses ("DunningLevel"), so the sources in that package and
-// the sources that mention those identifiers are read first. An
-// alphabetical slice read cmd/, admin/, audit/, and auth/ for a billing
-// task, and the model spent its expansion rounds finding billing.
-//
-// A directory in the path that matches a word of the request scores 3. Each
-// identifier of the request that the file mentions as a word scores 1.
-// Ties keep path order. When nothing scores, the result is the alphabetical
-// slice, as before.
+// rankedKeywords are Python and Go keywords and built-ins that never name
+// a project symbol.
+var rankedKeywords = map[string]bool{
+	"def": true, "class": true, "return": true, "import": true, "from": true,
+	"elif": true, "else": true, "for": true, "while": true, "not": true,
+	"and": true, "with": true, "try": true, "except": true, "finally": true,
+	"lambda": true, "pass": true, "yield": true, "raise": true, "assert": true,
+	"global": true, "nonlocal": true, "None": true, "True": true, "False": true,
+	"async": true, "await": true, "break": true, "continue": true, "self": true,
+	"func": true, "package": true, "var": true, "const": true, "type": true,
+	"struct": true, "interface": true, "map": true, "chan": true, "range": true,
+	"select": true, "case": true, "default": true, "defer": true, "switch": true,
+	"fallthrough": true, "goto": true, "make": true, "nil": true, "the": true,
+}
+
+// wordTokens returns the identifier-like words of text. A sentence-final
+// period is not part of the word, so "sympy.core.function." is one name.
+func wordTokens(text string) []string {
+	var out []string
+	for _, word := range identWordPattern.FindAllString(text, -1) {
+		if word = strings.TrimRight(word, "."); word != "" {
+			out = append(out, word)
+		}
+	}
+	return out
+}
+
+// rankedTokens returns the distinctive identifiers of a request. Code form
+// is a word in a code span, a name followed by "(", a snake_case word, a
+// dotted name (kept whole and split), or a CamelCase word with an inner
+// capital. A plain capitalized word counts only when code form also names
+// it. Tokens shorter than three characters and keywords are dropped.
+func rankedTokens(intent string) []string {
+	codeForm := map[string]bool{}
+	var candidates []string
+	add := func(word string) {
+		if len(word) < 3 || rankedKeywords[word] || slices.Contains(candidates, word) {
+			return
+		}
+		candidates = append(candidates, word)
+	}
+	addDotted := func(word string) {
+		add(word)
+		for _, part := range strings.Split(word, ".") {
+			add(part)
+		}
+	}
+	for _, span := range codeSpanPattern.FindAllString(intent, -1) {
+		for _, word := range wordTokens(span) {
+			codeForm[word] = true
+			if strings.Contains(word, ".") {
+				addDotted(word)
+			} else {
+				add(word)
+			}
+		}
+	}
+	prose := codeSpanPattern.ReplaceAllString(intent, " ")
+	for _, match := range callNamePattern.FindAllStringSubmatch(prose, -1) {
+		codeForm[match[1]] = true
+		addDotted(match[1])
+	}
+	for _, word := range wordTokens(prose) {
+		switch {
+		case strings.Contains(word, "."):
+			addDotted(word)
+		case strings.Contains(word, "_"), camelWordPattern.MatchString(word):
+			add(word)
+		}
+	}
+	for _, word := range intentIdentifierPattern.FindAllString(prose, -1) {
+		if codeForm[word] {
+			add(word)
+		}
+	}
+	return candidates
+}
+
+// isIdentByte reports whether b can continue an identifier.
+func isIdentByte(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// containsIdent reports whether body holds tok as a whole identifier.
+func containsIdent(body []byte, tok string) bool {
+	needle := []byte(tok)
+	for off := 0; off <= len(body); {
+		i := bytes.Index(body[off:], needle)
+		if i < 0 {
+			return false
+		}
+		start := off + i
+		end := start + len(needle)
+		if (start == 0 || !isIdentByte(body[start-1])) && (end == len(body) || !isIdentByte(body[end])) {
+			return true
+		}
+		off = start + 1
+	}
+	return false
+}
+
+// rankedSourcePaths is the fallback when the request names no file: the
+// ranked matches, or every source when the workspace is small. A large
+// workspace with no match gets nothing.
 func rankedSourcePaths(workDir, language, intent string, limit int) []string {
 	if matches := rankedSourceMatches(workDir, language, intent, limit); len(matches) > 0 {
 		return matches
 	}
-	return productionSourcePaths(workDir, language)
+	return allSourcesIfFew(workDir, language)
 }
 
 // rankedSourceMatches is rankedSourcePaths without the alphabetical
 // fallback: only the sources that match the request, best first.
+//
+// Tier one ranks files by request identifiers. Each candidate is read up to
+// maxRankedFileBytes. A token's weight is 1/df, where df counts the
+// candidate files that hold it. A token that no file holds, or that more
+// than rankedMaxDocShare of the files hold (never fewer than
+// rankedMinDocFreq), is dropped as generic. A file that defines a token
+// (def, class, func, type) scores 1 for it regardless of df. A file needs at
+// least one scoring token to rank. A directory word adds rankedDirWeight over
+// that limit. Ties go to the shorter path, then to lexical order.
+//
+// Tier two runs only when tier one ranks no file. It returns the sources
+// under a directory the request names by word, in path order. It never
+// mixes with tier one.
 func rankedSourceMatches(workDir, language, intent string, limit int) []string {
-	all := sourcePaths(workDir, language, false, maxRankedSourceFiles)
 	words := map[string]bool{}
 	for _, w := range intentWordPattern.FindAllString(strings.ToLower(intent), -1) {
 		words[w] = true
 	}
-	var idents []*regexp.Regexp
-	seen := map[string]bool{}
-	for _, id := range intentIdentifierPattern.FindAllString(sentenceStartPattern.ReplaceAllString(intent, "$1"), -1) {
-		if !seen[id] {
-			seen[id] = true
-			idents = append(idents, regexp.MustCompile(`\b`+regexp.QuoteMeta(id)+`\b`))
-		}
-	}
-	type scored struct {
-		path  string
-		score int
-	}
-	var ranked []scored
-	for _, path := range all {
-		score := 0
-		for _, dir := range strings.Split(filepath.ToSlash(filepath.Dir(path)), "/") {
-			if words[strings.ToLower(dir)] {
-				score += 3
-				break
-			}
-		}
-		if len(idents) > 0 {
-			if body := readHead(filepath.Join(workDir, path), maxRankedFileBytes); body != nil {
-				for _, id := range idents {
-					if id.Match(body) {
-						score++
-					}
-				}
-			}
-		}
-		if score > 0 {
-			ranked = append(ranked, scored{path, score})
-		}
-	}
+	all := sourcePaths(workDir, language, false, maxRankedSourceFiles)
+	tokens := rankedTokens(intent)
+	ranked := rankByTokens(workDir, all, tokens, words)
 	if len(ranked) == 0 {
+		var out []string
+		for _, path := range all {
+			if inWordDir(path, words) {
+				out = append(out, path)
+			}
+		}
+		ranked = out
+	}
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	return ranked
+}
+
+// inWordDir reports whether a directory of path is named by one of words.
+func inWordDir(path string, words map[string]bool) bool {
+	for _, d := range strings.Split(filepath.ToSlash(filepath.Dir(path)), "/") {
+		if words[strings.ToLower(d)] {
+			return true
+		}
+	}
+	return false
+}
+
+// definitionNamePattern captures the name a definition declares: a Python def
+// or class, or a Go func (with an optional receiver) or type.
+var definitionNamePattern = regexp.MustCompile(`(?m)^\s*(?:def|class|type|func(?:\s+\([^)]*\))?)\s+([A-Za-z_][A-Za-z0-9_]*)`)
+
+// definedNames returns the set of names a file body defines. One pass per
+// file serves every request token (F2: a regex per token cost seconds).
+func definedNames(body []byte) map[string]bool {
+	names := map[string]bool{}
+	for _, m := range definitionNamePattern.FindAllSubmatch(body, -1) {
+		names[string(m[1])] = true
+	}
+	return names
+}
+
+// rankByTokens is tier one of rankedSourceMatches: the candidate files
+// ranked by weighted token hits, best first. It returns nil when no token
+// is in code form or no file scores.
+func rankByTokens(workDir string, all []string, tokens []string, words map[string]bool) []string {
+	if len(tokens) == 0 {
 		return nil
 	}
-	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
-	out := make([]string, 0, limit)
-	for _, r := range ranked {
-		if len(out) == limit {
-			break
+	type fileHits struct {
+		path    string
+		hits    []int
+		defined map[int]bool
+		dir     bool
+	}
+	df := make([]int, len(tokens))
+	files := make([]fileHits, 0, len(all))
+	// One buffer serves every file: allocating a 512 KiB head per file cost
+	// more than the scan itself.
+	buf := make([]byte, maxRankedFileBytes)
+	for _, path := range all {
+		body := readHeadInto(filepath.Join(workDir, path), buf)
+		f := fileHits{path: path, defined: map[int]bool{}, dir: inWordDir(path, words)}
+		var defined map[string]bool
+		for i, tok := range tokens {
+			if !containsIdent(body, tok) {
+				continue
+			}
+			f.hits = append(f.hits, i)
+			df[i]++
+			if defined == nil {
+				defined = definedNames(body)
+			}
+			if defined[tok] {
+				f.defined[i] = true
+			}
 		}
+		files = append(files, f)
+	}
+	dfLimit := math.Max(rankedMaxDocShare*float64(len(all)), rankedMinDocFreq)
+	dirScore := rankedDirWeight / dfLimit
+	type scored struct {
+		path  string
+		score float64
+	}
+	var scoredFiles []scored
+	for _, f := range files {
+		score := 0.0
+		for _, i := range f.hits {
+			switch {
+			case f.defined[i]:
+				score++
+			case float64(df[i]) <= dfLimit:
+				score += 1 / float64(df[i])
+			}
+		}
+		if score == 0 {
+			continue // no distinctive hit: a directory word alone never ranks
+		}
+		if f.dir {
+			score += dirScore
+		}
+		scoredFiles = append(scoredFiles, scored{f.path, score})
+	}
+	sort.SliceStable(scoredFiles, func(i, j int) bool {
+		if scoredFiles[i].score != scoredFiles[j].score {
+			return scoredFiles[i].score > scoredFiles[j].score
+		}
+		if len(scoredFiles[i].path) != len(scoredFiles[j].path) {
+			return len(scoredFiles[i].path) < len(scoredFiles[j].path)
+		}
+		return scoredFiles[i].path < scoredFiles[j].path
+	})
+	out := make([]string, 0, len(scoredFiles))
+	for _, r := range scoredFiles {
 		out = append(out, r.path)
 	}
 	return out
 }
 
-// readHead returns up to max bytes from the start of the file, or nil.
-func readHead(path string, max int) []byte {
+// readHeadInto fills buf from the start of the file and returns the bytes
+// read, or nil when the file cannot be opened. The result aliases buf.
+func readHeadInto(path string, buf []byte) []byte {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
-	buf := make([]byte, max)
 	n, _ := io.ReadFull(f, buf)
 	return buf[:n]
 }
@@ -524,7 +740,14 @@ func formatContextBundle(bundle *schemas.ContextBundle) []string {
 		if raw, ok := item.Payload["text"].(string); ok {
 			text = raw
 		} else if item.Payload != nil {
-			payload, _ := json.Marshal(item.Payload)
+			// Host-only keys (the raw source bytes) never enter the prompt.
+			visible := make(map[string]any, len(item.Payload))
+			for key, value := range item.Payload {
+				if key != "raw" {
+					visible[key] = value
+				}
+			}
+			payload, _ := json.Marshal(visible)
 			text = string(payload)
 		}
 		formatted = append(formatted, fmt.Sprintf(
@@ -541,8 +764,7 @@ func formatContextBundle(bundle *schemas.ContextBundle) []string {
 func contextItemIdentity(item schemas.ContextItem) string {
 	path, _ := item.Payload["path"].(string)
 	version, _ := item.Payload["version"].(string)
-	start, _ := item.Payload["start"].(int)
-	end, _ := item.Payload["end"].(int)
+	start, end := payloadLine(item.Payload["start"]), payloadLine(item.Payload["end"])
 	if path != "" && version != "" {
 		return fmt.Sprintf("%s@%s#%d-%d", path, version, start, end)
 	}
@@ -633,5 +855,62 @@ func fileChangeArraySchema() map[string]any {
 			},
 			"required": []string{"path", "content", "change_type"},
 		},
+	}
+}
+
+// gitChangedFileLines lists the files changed since HEAD and the untracked
+// files, as paths relative to workDir. Changed paths come first, and each path
+// appears once. A failed diff returns its error. A failed untracked listing
+// returns an error that names untracked file discovery, so a caller never gets
+// a partial list that looks complete.
+func gitChangedFileLines(ctx context.Context, workDir, diffPurpose string, options StageOptions) ([]string, error) {
+	// core.quotepath=off keeps non-ASCII names unquoted, so the extension match
+	// and the stat see the real name.
+	diffCommand := []string{"git", "-c", "core.quotepath=off", "diff", "--name-only", "--relative", "HEAD"}
+	diffOut, err := runRecordedOutput(ctx, options, "splice.shell", map[string]any{
+		"command": diffCommand,
+		"cwd":     workDir,
+		"purpose": diffPurpose,
+	}, workDir, diffCommand)
+	if err != nil {
+		return nil, err
+	}
+	untrackedCommand := []string{"git", "-c", "core.quotepath=off", "ls-files", "--others", "--exclude-standard"}
+	untrackedOut, err := runRecordedOutput(ctx, options, "splice.shell", map[string]any{
+		"command": untrackedCommand,
+		"cwd":     workDir,
+		"purpose": "untracked file discovery",
+	}, workDir, untrackedCommand)
+	if err != nil {
+		return nil, fmt.Errorf("untracked file discovery in %s: %w", workDir, err)
+	}
+	seen := make(map[string]struct{})
+	var lines []string
+	for _, out := range [][]byte{diffOut, untrackedOut} {
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if _, ok := seen[line]; ok {
+				continue
+			}
+			seen[line] = struct{}{}
+			lines = append(lines, line)
+		}
+	}
+	return lines, nil
+}
+
+// truncatedCoverageRun reports a file walk that stopped at its limit. Its
+// required incomplete status makes the aggregated report incomplete. The caller
+// prepends it to the tool runs, so its summary becomes the report summary.
+func truncatedCoverageRun(scope string, scanned, limit int) schemas.VerificationToolRun {
+	return schemas.VerificationToolRun{
+		Tool:     "coverage",
+		Required: true,
+		Scope:    scope,
+		Status:   schemas.VerificationIncomplete,
+		Summary:  fmt.Sprintf("scanned %d file(s); more files were not scanned (limit %d)", scanned, limit),
 	}
 }

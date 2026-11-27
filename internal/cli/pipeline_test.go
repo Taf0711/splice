@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -119,6 +120,41 @@ func TestPipelineCommandUnknownVerb(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "unknown pipeline subcommand") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// TestPipelineSubcommandsPrintUsageForHelp pins that -h and --help print the
+// pipeline usage on stdout and exit 0 for each subcommand, before it runs.
+func TestPipelineSubcommandsPrintUsageForHelp(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, verb := range []string{"list", "show", "use", "export", "import"} {
+		for _, flag := range []string{"-h", "--help"} {
+			var stdout, stderr bytes.Buffer
+			args := []string{verb, flag}
+			if code := runPipelineCommand(args, &stdout, &stderr); code != 0 {
+				t.Errorf("%v exited %d: %s", args, code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "Usage: splice pipeline <command>") {
+				t.Errorf("%v stdout = %q, want the pipeline usage", args, stdout.String())
+			}
+		}
+	}
+}
+
+// TestPipelineEditHelpPrintsUsageAndExitsZero pins that --help prints the edit
+// usage on stdout and starts no server.
+func TestPipelineEditHelpPrintsUsageAndExitsZero(t *testing.T) {
+	for _, args := range [][]string{{"edit", "--help"}, {"edit", "-h"}} {
+		var stdout, stderr bytes.Buffer
+		if code := runPipelineCommand(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("%v exited %d: %s", args, code, stderr.String())
+		}
+		if want := "usage: splice pipeline edit [--new] [name|default]"; !strings.Contains(stdout.String(), want) {
+			t.Errorf("%v stdout = %q, want it to contain %q", args, stdout.String(), want)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("%v stderr = %q, want none", args, stderr.String())
+		}
 	}
 }
 
@@ -314,5 +350,75 @@ func TestPipelineEditServesTheEditorAndPrintsTheLinkOnStderr(t *testing.T) {
 	}
 	if drafts, _ := filepath.Glob(filepath.Join(base, "splice", "pipelines", ".drafts", "*.json")); len(drafts) != 1 {
 		t.Fatalf("drafts = %v, want one", drafts)
+	}
+}
+
+// TestEditorUseSaysWhenATrustedProjectFileOutranksTheEntry pins that the
+// editor's Use says when a trusted project file still outranks the entry it
+// made active, as the TUI does.
+func TestEditorUseSaysWhenATrustedProjectFileOutranksTheEntry(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	writePipelineFile(t, filepath.Join(base, "splice", "pipelines", "team.json"), "team")
+	const outranks = "A trusted project .splice/pipeline.json still outranks it."
+
+	root := t.TempDir()
+	writePipelineFile(t, filepath.Join(root, ".splice", "pipeline.json"), "project")
+	text, err := editorUse(root, true)("team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, outranks) {
+		t.Errorf("Use with a trusted project file = %q, want it to contain %q", text, outranks)
+	}
+
+	text, err = editorUse(t.TempDir(), true)("team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(text, "outranks") {
+		t.Errorf("Use without a project file = %q, want no outranks sentence", text)
+	}
+}
+
+// TestEditorUseIgnoresAnUntrustedProjectFile pins that an untrusted project
+// file, which a run ignores, adds no outranks sentence to the editor's Use.
+func TestEditorUseIgnoresAnUntrustedProjectFile(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", base)
+	writePipelineFile(t, filepath.Join(base, "splice", "pipelines", "team.json"), "team")
+	root := t.TempDir()
+	writePipelineFile(t, filepath.Join(root, ".splice", "pipeline.json"), "project")
+	text, err := editorUse(root, false)("team")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(text, "outranks") {
+		t.Errorf("Use with an untrusted project file = %q, want no outranks sentence", text)
+	}
+}
+
+// TestPipelineCommandsRefuseAnOversizeTopology pins that show, export, and
+// import refuse a topology over the size limit and name the count and limit.
+func TestPipelineCommandsRefuseAnOversizeTopology(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	top := schemas.PipelineTopology{Version: schemas.TopologySchemaVersion, Name: "big"}
+	for i := 0; i <= schemas.MaxTopologyNodes; i++ {
+		top.Nodes = append(top.Nodes, schemas.PipelineNode{Name: fmt.Sprintf("n%d", i), Type: schemas.NodeTypeCommand, Command: []string{"true"}})
+	}
+	data, err := json.Marshal(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "big.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("%d nodes exceed the limit of %d", schemas.MaxTopologyNodes+1, schemas.MaxTopologyNodes)
+	for _, args := range [][]string{{"show", path}, {"export", path}, {"import", path, "--yes"}} {
+		var stdout, stderr bytes.Buffer
+		if code := runPipelineCommand(args, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), want) {
+			t.Errorf("%v: exit %d, stderr %q; want a refusal that contains %q", args, code, stderr.String(), want)
+		}
 	}
 }

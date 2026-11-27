@@ -8,12 +8,16 @@ package warmcost
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/flags"
 	"github.com/Taf0711/splice/internal/splice"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -189,13 +193,74 @@ func containsEnv(env []string, want string) bool {
 }
 
 func TestLoopExecArgsSelectPlainAgentLoop(t *testing.T) {
-	args := execArgs(ArmLoop, "model-x", "session-x", "task")
+	args := execArgs(ArmLoop, "model-x", "session-x", "task", false)
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--loop") {
 		t.Fatalf("loop args = %v, missing --loop", args)
 	}
-	if strings.Contains(strings.Join(execArgs(ArmCold, "model-x", "session-x", "task"), " "), "--loop") {
+	if strings.Contains(strings.Join(execArgs(ArmCold, "model-x", "session-x", "task", false), " "), "--loop") {
 		t.Fatal("cold args unexpectedly selected the plain loop")
+	}
+}
+
+func TestExecArgsTrustProjectSelectsTrustFlag(t *testing.T) {
+	// Default: the exact invocation every existing campaign uses.
+	wantUntrusted := []string{
+		"--no-trust", "exec",
+		"--output-format", "stream-json",
+		"--memory", "off",
+		"--init-session-id", "session-x",
+		"--model", "model-x",
+		"task",
+	}
+	if got := execArgs(ArmCold, "model-x", "session-x", "task", false); !reflect.DeepEqual(got, wantUntrusted) {
+		t.Fatalf("untrusted args = %v, want %v", got, wantUntrusted)
+	}
+
+	// Trusted through the environment: no root trust flag at all. The
+	// attempt sets SPLICE_TRUST_WORKSPACE=1, which trusts without writing the
+	// trust store, so passing --trust would write it.
+	wantTrusted := wantUntrusted[1:]
+	if got := execArgs(ArmCold, "model-x", "session-x", "task", true); !reflect.DeepEqual(got, wantTrusted) {
+		t.Fatalf("trusted args = %v, want %v", got, wantTrusted)
+	}
+}
+
+func TestAttemptEnvTrustProjectSetsTrustEnv(t *testing.T) {
+	// An operator value must never reach the child, in either mode.
+	base := []string{"PATH=/bin", "SPLICE_TRUST_WORKSPACE=0"}
+	count := func(env []string, prefix string) (n int, last string) {
+		for _, kv := range env {
+			if strings.HasPrefix(kv, prefix) {
+				n++
+				last = kv
+			}
+		}
+		return n, last
+	}
+
+	off := attemptEnv(base, false)
+	if n, _ := count(off, "SPLICE_TRUST_WORKSPACE="); n != 0 {
+		t.Fatalf("untrusted env kept inherited SPLICE_TRUST_WORKSPACE: %v", off)
+	}
+	if !containsEnv(off, "PATH=/bin") {
+		t.Fatalf("untrusted env dropped PATH: %v", off)
+	}
+
+	on := attemptEnv(base, true)
+	if n, last := count(on, "SPLICE_TRUST_WORKSPACE="); n != 1 || last != "SPLICE_TRUST_WORKSPACE=1" {
+		t.Fatalf("trusted env = %v, want exactly SPLICE_TRUST_WORKSPACE=1", on)
+	}
+}
+
+func TestTrustEnvBeatsNeverSetting(t *testing.T) {
+	// attemptEnv relies on this order: env 1 trusts before the user setting
+	// is read, and it does not persist. If this fails, --trust-project no
+	// longer trusts a workspace whose user config says defaultProjectTrust
+	// "never".
+	decision, persist := config.ResolveTrust("/work/ws", nil, "never", false, false, "1")
+	if decision != config.TrustTrusted || persist {
+		t.Fatalf("env 1 with setting never = (%v, persist %v), want (trusted, no persist)", decision, persist)
 	}
 }
 
@@ -233,5 +298,179 @@ func TestManifestManifestShape(t *testing.T) {
 	joined := strings.Join(jev, " ")
 	if !strings.Contains(joined, "pipeline.decision_advisor=true") || !strings.Contains(joined, "active_experimental") {
 		t.Fatalf("manifest env construction lost a switch: %s", joined)
+	}
+}
+
+func TestDesignArmIsColdWithMemoryOff(t *testing.T) {
+	if !ArmDesign.Valid() || ArmDesign.MemoryMode() != "off" || ArmDesign.Base() != ArmCold {
+		t.Fatal("design must be a valid cold-based arm with memory off")
+	}
+	if strings.Join(ArmDesign.Env(), " ") != strings.Join(ArmCold.Env(), " ") {
+		t.Fatalf("design env = %v, want the cold env %v", ArmDesign.Env(), ArmCold.Env())
+	}
+}
+
+func TestDesignExecArgsPassTheRequestAsTheDesignValue(t *testing.T) {
+	args := execArgs(ArmDesign, "model-x", "session-x", "task", false)
+	if len(args) < 2 || args[len(args)-2] != "--design" || args[len(args)-1] != "task" {
+		t.Fatalf("design args = %v, want the request as the value of --design", args)
+	}
+	if strings.Contains(strings.Join(args, " "), "--loop") {
+		t.Fatalf("design args = %v, must not select the plain loop", args)
+	}
+}
+
+// TestDesignLedgerComesFromStreamUsage pins the design attempt parse. The
+// final event is a design plan result with no usage records, so the ledger
+// comes from the stream usage events, with their stage names.
+func TestDesignLedgerComesFromStreamUsage(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"schemaVersion":2,"type":"usage","runId":"r","promptTokens":100,"completionTokens":20,"costUsd":0.5,"costStatus":"priced","usageReported":true,"stage":"design_crystallize","iteration":1}`,
+		`{"schemaVersion":2,"type":"usage","runId":"r","promptTokens":40,"completionTokens":10,"costUsd":0.25,"costStatus":"priced","usageReported":true,"stage":"code_writer","iteration":1}`,
+		`{"schemaVersion":2,"type":"final","runId":"r","text":"{\"plan_id\":\"plan-x\",\"status\":\"completed\"}"}`,
+	}, "\n")
+	var attempt Attempt
+	if err := applyDesignLedger(&attempt, []byte(stream)); err != nil {
+		t.Fatalf("applyDesignLedger: %v", err)
+	}
+	if attempt.RunID != "plan-x" || attempt.RunStatus != "completed" {
+		t.Fatalf("run id/status = %q/%q, want plan-x/completed", attempt.RunID, attempt.RunStatus)
+	}
+	if len(attempt.Requests) != 2 || attempt.Requests[0].Stage != "design_crystallize" || attempt.Requests[1].Stage != "code_writer" {
+		t.Fatalf("requests = %+v, want design_crystallize then code_writer", attempt.Requests)
+	}
+	if attempt.Totals.Requests != 2 || attempt.Totals.InputTokens != 140 || attempt.Totals.OutputTokens != 30 {
+		t.Fatalf("totals = %+v, want 2 requests, 140 input and 30 output tokens", attempt.Totals)
+	}
+	if attempt.Totals.BilledUSD != 0.75 || attempt.Totals.PricedRecords != 2 {
+		t.Fatalf("totals = %+v, want 0.75 USD over 2 priced records", attempt.Totals)
+	}
+}
+
+func TestDesignLedgerRejectsStreamWithoutFinal(t *testing.T) {
+	var attempt Attempt
+	if err := applyDesignLedger(&attempt, []byte(`{"type":"usage","stage":"plan_critic"}`)); err == nil {
+		t.Fatal("a stream without a final design result must fail, not read as zero spend")
+	}
+}
+
+// TestDesignLedgerKeepsUsageWithoutFinal pins the failed-run parse. A revision
+// error ends the run with an error event and no final event. The usage that
+// the attempt already spent must still count, and the attempt names the
+// missing result as its ledger error.
+func TestDesignLedgerKeepsUsageWithoutFinal(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"schemaVersion":2,"type":"usage","runId":"r","promptTokens":100,"completionTokens":20,"costUsd":0.5,"costStatus":"priced","usageReported":true,"stage":"design_crystallize","iteration":1}`,
+		`{"schemaVersion":2,"type":"usage","runId":"r","promptTokens":30,"completionTokens":5,"costUsd":0.25,"costStatus":"priced","usageReported":true,"stage":"plan_critic","iteration":1}`,
+		`{"schemaVersion":2,"type":"error","runId":"r","code":"provider_error","message":"design revision: stream failed"}`,
+		`{"schemaVersion":2,"type":"run_end","runId":"r","status":"error","exitCode":3}`,
+	}, "\n")
+	var attempt Attempt
+	err := applyDesignLedger(&attempt, []byte(stream))
+	if err == nil {
+		t.Fatal("a run without a final result must name a ledger error")
+	}
+	if attempt.Totals.Requests != 2 || attempt.Totals.BilledUSD != 0.75 || attempt.Totals.PricedRecords != 2 {
+		t.Fatalf("totals = %+v, want the spent usage of both requests kept", attempt.Totals)
+	}
+	if len(attempt.Requests) != 2 || attempt.Requests[1].Stage != "plan_critic" {
+		t.Fatalf("requests = %+v, want both design requests kept", attempt.Requests)
+	}
+}
+
+// TestDesignLedgerReportsTheCritiqueState pins the critique flag of a design
+// attempt. The design_plan event says whether the critique was resolved.
+func TestDesignLedgerReportsTheCritiqueState(t *testing.T) {
+	for _, tc := range []struct {
+		resolved bool
+		want     bool
+	}{
+		{resolved: false, want: true},
+		{resolved: true, want: false},
+	} {
+		stream := strings.Join([]string{
+			fmt.Sprintf(`{"schemaVersion":2,"type":"design_plan","runId":"r","planId":"plan-x","tasks":["A"],"revised":true,"critiqueResolved":%t,"critiqueIssues":1}`, tc.resolved),
+			`{"schemaVersion":2,"type":"final","runId":"r","text":"{\"plan_id\":\"plan-x\",\"status\":\"completed\"}"}`,
+		}, "\n")
+		var attempt Attempt
+		if err := applyDesignLedger(&attempt, []byte(stream)); err != nil {
+			t.Fatalf("applyDesignLedger: %v", err)
+		}
+		if attempt.CritiqueUnresolved != tc.want {
+			t.Fatalf("resolved=%t: CritiqueUnresolved = %t, want %t", tc.resolved, attempt.CritiqueUnresolved, tc.want)
+		}
+	}
+}
+
+// TestAttemptLedgerDispatchesByArm pins the run-task branch. A design arm reads
+// its design result, and a cold arm reads a pipeline result. Each arm reads only
+// the result that its run produces.
+func TestAttemptLedgerDispatchesByArm(t *testing.T) {
+	design := strings.Join([]string{
+		`{"schemaVersion":2,"type":"usage","runId":"r","promptTokens":10,"completionTokens":1,"costUsd":0.1,"costStatus":"priced","usageReported":true,"stage":"design_crystallize","iteration":1}`,
+		`{"schemaVersion":2,"type":"final","runId":"r","text":"{\"plan_id\":\"plan-x\",\"status\":\"completed\"}"}`,
+	}, "\n")
+	pipelinePayload, _ := json.Marshal(map[string]any{
+		"run_id": "run-cold", "status": "completed", "tier": "light",
+		"stages": []any{}, "cost_coverage": "not_applicable",
+		"total_cost_usd": 0, "priced_request_count": 0,
+	})
+	pipeline := `{"schemaVersion":2,"type":"final","runId":"r","text":` + strconvQuote(string(pipelinePayload)) + `}`
+
+	var designAttempt Attempt
+	if err := applyAttemptLedger(&designAttempt, ArmDesign, []byte(design)); err != nil {
+		t.Fatalf("design arm: %v", err)
+	}
+	if designAttempt.RunID != "plan-x" || len(designAttempt.Requests) != 1 {
+		t.Fatalf("design arm = run %q with %d request(s), want plan-x with 1", designAttempt.RunID, len(designAttempt.Requests))
+	}
+
+	var coldAttempt Attempt
+	if err := applyAttemptLedger(&coldAttempt, ArmCold, []byte(pipeline)); err != nil {
+		t.Fatalf("cold arm: %v", err)
+	}
+	if coldAttempt.RunID != "run-cold" {
+		t.Fatalf("cold arm run id = %q, want run-cold", coldAttempt.RunID)
+	}
+
+	var wrong Attempt
+	if err := applyAttemptLedger(&wrong, ArmCold, []byte(design)); err == nil {
+		t.Fatal("the cold arm must not accept a design result")
+	}
+}
+
+func strconvQuote(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+// TestDesignLedgerCostCoverage pins the coverage of a design attempt. A run
+// without a valid final result is partial even when every record is priced,
+// because the run did not finish. A complete run with every record priced is
+// complete.
+func TestDesignLedgerCostCoverage(t *testing.T) {
+	priced := `{"schemaVersion":2,"type":"usage","runId":"r","promptTokens":100,"completionTokens":20,"costUsd":0.5,"costStatus":"priced","usageReported":true,"stage":"design_crystallize","iteration":1}`
+	final := `{"schemaVersion":2,"type":"final","runId":"r","text":"{\"plan_id\":\"plan-x\",\"status\":\"completed\"}"}`
+	revisionError := strings.Join([]string{
+		priced,
+		`{"schemaVersion":2,"type":"error","runId":"r","code":"provider_error","message":"design revision: stream failed"}`,
+		`{"schemaVersion":2,"type":"run_end","runId":"r","status":"error","exitCode":3}`,
+	}, "\n")
+	complete := priced + "\n" + final
+
+	var failed Attempt
+	if err := applyDesignLedger(&failed, []byte(revisionError)); err == nil {
+		t.Fatal("a run without a final result must name a ledger error")
+	}
+	if failed.CostCoverage != schemas.CostCoveragePartial {
+		t.Fatalf("revision-error coverage = %q, want %q", failed.CostCoverage, schemas.CostCoveragePartial)
+	}
+
+	var done Attempt
+	if err := applyDesignLedger(&done, []byte(complete)); err != nil {
+		t.Fatalf("applyDesignLedger: %v", err)
+	}
+	if done.CostCoverage != schemas.CostCoverageComplete {
+		t.Fatalf("complete run coverage = %q, want %q", done.CostCoverage, schemas.CostCoverageComplete)
 	}
 }

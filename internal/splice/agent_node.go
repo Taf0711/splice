@@ -127,7 +127,7 @@ func (r agentNodeRun) run(ctx context.Context, req stages.AgentNodeRequest) (sta
 	if r.selection.Provider == nil {
 		return stages.AgentNodeResult{}, fmt.Errorf("no provider is available for the model")
 	}
-	if err := agentNodeSandboxError(opts.Sandbox); err != nil {
+	if err := agentNodeSandboxError(opts.Sandbox, opts.AcceptNestedSandbox); err != nil {
 		return stages.AgentNodeResult{}, err
 	}
 	// A declared tool the run disables fails the node at start. The node never
@@ -253,6 +253,11 @@ func (r agentNodeRun) run(ctx context.Context, req stages.AgentNodeRequest) (sta
 				changed = append(changed, file)
 			}
 		}
+		if result.DenialReason != agent.DenialNone {
+			// A refused call of a command tool is a refused spawn of this
+			// node. The call arguments are not kept, so no program is named.
+			sandboxEvidenceFrom(ctx).refuseToolCall(opts.Registry, result.Name, nil, sandbox, refusalFromDenial(result.DenialReason))
+		}
 		if result.DenialReason == agent.DenialApprovalCanceled {
 			// The user canceled an approval prompt. That cancels the run, not
 			// only the node.
@@ -303,12 +308,13 @@ func (r agentNodeRun) run(ctx context.Context, req stages.AgentNodeRequest) (sta
 
 // agentNodeSandboxError returns why an agent node cannot run under engine, or
 // nil when engine enforces its policy with the native sandbox. The run start
-// and each node use it, so both refuse with the same error.
-func agentNodeSandboxError(engine *sandbox.Engine) error {
+// and each node use it, so both refuse with the same error. acceptNested
+// accepts the nested-sandbox gap only (runSandboxGap).
+func agentNodeSandboxError(engine *sandbox.Engine, acceptNested bool) error {
 	if engine == nil {
 		return errors.New("no sandbox engine is available; an agent node never runs unsandboxed")
 	}
-	if gap := engine.EnforcementGap(); gap != "" {
+	if gap := runSandboxGap(engine, acceptNested); gap != "" {
 		return fmt.Errorf("agent nodes need an enforcing sandbox; %s", gap)
 	}
 	return nil

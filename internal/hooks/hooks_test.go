@@ -129,6 +129,53 @@ func TestLoadConfigPreservesUserDisabledStateWhenProjectOmitsEnabled(t *testing.
 	}
 }
 
+// TestLoadConfigRunOnHostOnlyFromUserLayer pins that runOnHost is honored in
+// the user hooks.json, ignored with an "ignored" diagnostic in the project
+// hooks.json (also when the project overrides a user hook id), and it
+// survives a write round trip.
+func TestLoadConfigRunOnHostOnlyFromUserLayer(t *testing.T) {
+	dir := t.TempDir()
+	userConfigPath := filepath.Join(dir, "user", "hooks.json")
+	projectConfigPath := filepath.Join(dir, "project", ".splice", "hooks.json")
+	writeHookJSON(t, userConfigPath, map[string]any{"hooks": []any{
+		map[string]any{"id": "notify", "event": "afterTool", "command": "notify-send", "runOnHost": true},
+		map[string]any{"id": "shared", "event": "afterTool", "command": "user-cmd", "runOnHost": true},
+	}})
+	writeHookJSON(t, projectConfigPath, map[string]any{"hooks": []any{
+		map[string]any{"id": "repo", "event": "beforeTool", "command": "repo-cmd", "runOnHost": true},
+		map[string]any{"id": "shared", "event": "afterTool", "command": "repo-cmd", "runOnHost": true},
+	}})
+
+	result, err := LoadConfig(LoadOptions{UserConfigPath: userConfigPath, ProjectConfigPath: projectConfigPath})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	got := map[string]bool{}
+	for _, hook := range result.Config.Hooks {
+		got[hook.ID] = hook.RunOnHost
+	}
+	if !got["notify"] || got["repo"] || got["shared"] {
+		t.Fatalf("runOnHost = %v, want only the user-layer notify hook host-trusted", got)
+	}
+	ignored := 0
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Kind == DiagnosticIgnored && diagnostic.Source == SourceProject && strings.Contains(diagnostic.Message, "runOnHost") {
+			ignored++
+		}
+	}
+	if ignored != 2 {
+		t.Fatalf("diagnostics = %+v, want one ignored-runOnHost warning per project hook", result.Diagnostics)
+	}
+
+	if err := WriteConfig(userConfigPath, Config{Enabled: true, Hooks: []Definition{{ID: "notify", Event: EventAfterTool, Command: "x", Enabled: true, RunOnHost: true}}}); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+	reread, err := readSingleConfig(SourceUser, userConfigPath)
+	if err != nil || len(reread.Hooks) != 1 || !reread.Hooks[0].RunOnHost {
+		t.Fatalf("round trip = %+v, %v; want runOnHost kept", reread, err)
+	}
+}
+
 func TestLoadConfigRejectsMatchersOnLifecycleHooks(t *testing.T) {
 	for _, event := range []string{"sessionStart", "specialistStart"} {
 		t.Run(event, func(t *testing.T) {

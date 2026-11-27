@@ -1673,6 +1673,7 @@ func dispatchBeforeTool(ctx context.Context, options Options, call ToolCall, arg
 		Event:      hooks.EventBeforeTool,
 		ToolName:   call.Name,
 		ToolCallID: call.ID,
+		Sandbox:    options.Sandbox,
 		Payload: map[string]any{
 			"event":      string(hooks.EventBeforeTool),
 			"tool":       call.Name,
@@ -1696,6 +1697,7 @@ func dispatchAfterTool(ctx context.Context, options Options, call ToolCall, args
 		Event:      hooks.EventAfterTool,
 		ToolName:   call.Name,
 		ToolCallID: call.ID,
+		Sandbox:    options.Sandbox,
 		Payload: map[string]any{
 			"event":        string(hooks.EventAfterTool),
 			"tool":         call.Name,

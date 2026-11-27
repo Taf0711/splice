@@ -63,6 +63,11 @@ type Config struct {
 	// SidecarRoot is the directory the runner assigns per-class sidecar
 	// sockets and databases under. Empty keeps the ambient operator sidecar.
 	SidecarRoot string
+	// TrustProject trusts each attempt's workspace through the environment
+	// (SPLICE_TRUST_WORKSPACE=1), so its .splice/config.json loads (for
+	// example verify.testCommand). The trust store is not written. False
+	// keeps the --no-trust invocation.
+	TrustProject bool
 }
 
 // ExecRequest is one child process invocation.
@@ -107,6 +112,7 @@ type Provenance struct {
 	SidecarRevision string        `json:"sidecar_revision"`
 	ModelID         string        `json:"model_id"`
 	ModelSettings   ModelSettings `json:"model_settings"`
+	TrustProject    bool          `json:"trust_project"`
 	Arms            []Arm         `json:"arms"`
 	Tasks           int           `json:"tasks"`
 	Repeats         int           `json:"repeats"`
@@ -228,6 +234,10 @@ type Runner struct {
 	// sidecarStops holds the stop function of each sidecar the runner
 	// started, by class.
 	sidecarStops map[string]func() error
+	// rateLimitMax and rateLimitWait bound the usage-limit retries of one
+	// sequence. NewRunner sets them from the constants; tests lower them.
+	rateLimitMax  int
+	rateLimitWait time.Duration
 }
 
 // A sequence with an attempt whose requests never reached the model runs
@@ -236,7 +246,61 @@ type Runner struct {
 const (
 	networkRetries   = 12
 	networkRetryWait = 5 * time.Minute
+	// A provider usage limit lasts hours. 32 waits of 15 minutes cover 8 hours.
+	rateLimitRetries   = 32
+	rateLimitRetryWait = 15 * time.Minute
 )
+
+// rateLimitMarkers name a provider usage limit in an error message or a
+// failed stage reason.
+var rateLimitMarkers = []string{"rate limit error:", "usage limit has been reached"}
+
+// endedOnRateLimit reports a run that the provider's usage limit stopped. It
+// reads error events and failed stage reasons only. A model that quotes the
+// phrase in its own text (a reasoning or text delta) does not match.
+func endedOnRateLimit(stdout []byte) bool {
+	for _, line := range bytes.Split(stdout, []byte("\n")) {
+		var ev struct{ Type, Status, Message, Reason string }
+		if json.Unmarshal(line, &ev) != nil {
+			continue
+		}
+		var text string
+		switch {
+		case ev.Type == "error":
+			text = ev.Message
+		case ev.Type == "stage" && (ev.Status == "failed" || ev.Status == "incomplete"):
+			text = ev.Reason
+		default:
+			continue
+		}
+		text = strings.ToLower(text)
+		for _, marker := range rateLimitMarkers {
+			if strings.Contains(text, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func rateLimited(attempts []Attempt) bool {
+	for _, a := range attempts {
+		if a.RateLimited {
+			return true
+		}
+	}
+	return false
+}
+
+// wait pauses for d through the sleep seam. Tests replace the seam so that no
+// retry sleeps.
+func (r *Runner) wait(d time.Duration) {
+	if r.sleep != nil {
+		r.sleep(d)
+		return
+	}
+	time.Sleep(d)
+}
 
 // endedOnConnectivity reports a run whose error event is a provider
 // connection drop that outlasted splice's own replays. Such a run measures
@@ -334,7 +398,7 @@ func NewRunner(cfg Config, seam ExecFunc) (*Runner, error) {
 	if seam == nil {
 		seam = runExec
 	}
-	runner := &Runner{cfg: cfg, exec: seam, now: time.Now}
+	runner := &Runner{cfg: cfg, exec: seam, now: time.Now, rateLimitMax: rateLimitRetries, rateLimitWait: rateLimitRetryWait}
 	runner.reanchorFn = runner.reanchorSequence
 	runner.startSidecarFn = func(ctx context.Context, socket string, env []string) (func() error, error) {
 		return startMemd(ctx, cfg.Binary, socket, env)
@@ -447,6 +511,7 @@ func (r *Runner) Run(ctx context.Context) (Aggregate, error) {
 		SidecarRevision: r.cfg.SidecarRevision,
 		ModelID:         r.cfg.Model,
 		ModelSettings:   r.cfg.ModelSettings,
+		TrustProject:    r.cfg.TrustProject,
 		Arms:            append([]Arm(nil), r.cfg.Arms...),
 		Tasks:           len(r.cfg.Tasks),
 		Repeats:         r.cfg.Repeats,
@@ -485,17 +550,29 @@ func (r *Runner) Run(ctx context.Context) (Aggregate, error) {
 		for _, seq := range sequences {
 			for _, arm := range arms {
 				seqAttempts, seqErr := r.runSequence(ctx, seq, arm, repeat, seqBase, provenance)
-				for try := 1; upstreamUnreachable(seqAttempts); try++ {
-					if try > networkRetries {
-						return Aggregate{}, fmt.Errorf("warmcost: sequence %d arm %s repeat %d: the model upstream stayed unreachable after %d retries", seq.Index, arm, repeat, networkRetries)
-					}
-					fmt.Fprintf(os.Stderr, "warmcost: sequence %d arm %s repeat %d: model upstream unreachable; retry %d of %d in %s\n", seq.Index, arm, repeat, try, networkRetries, networkRetryWait)
-					if r.sleep != nil {
-						r.sleep(networkRetryWait)
+				// An outage and a usage limit each rerun the sequence on their
+				// own schedule. The rerun replaces the discarded attempts, so
+				// neither kind reaches the aggregate. One counter numbers every
+				// rerun, so each one gets a new session id.
+				netTry, limitTry, reruns := 0, 0, 0
+				for upstreamUnreachable(seqAttempts) || rateLimited(seqAttempts) {
+					if upstreamUnreachable(seqAttempts) {
+						netTry++
+						if netTry > networkRetries {
+							return Aggregate{}, fmt.Errorf("warmcost: sequence %d arm %s repeat %d: the model upstream stayed unreachable after %d retries", seq.Index, arm, repeat, networkRetries)
+						}
+						fmt.Fprintf(os.Stderr, "warmcost: sequence %d arm %s repeat %d: model upstream unreachable; retry %d of %d in %s\n", seq.Index, arm, repeat, netTry, networkRetries, networkRetryWait)
+						r.wait(networkRetryWait)
 					} else {
-						time.Sleep(networkRetryWait)
+						limitTry++
+						if limitTry > r.rateLimitMax {
+							return Aggregate{}, fmt.Errorf("warmcost: sequence %d arm %s repeat %d: the provider usage limit stayed reached after %d retries; stopping the campaign (%d attempts written)", seq.Index, arm, repeat, r.rateLimitMax, len(attempts))
+						}
+						fmt.Fprintf(os.Stderr, "warmcost: sequence %d arm %s repeat %d: provider usage limit reached; retry %d of %d in %s\n", seq.Index, arm, repeat, limitTry, r.rateLimitMax, r.rateLimitWait)
+						r.wait(r.rateLimitWait)
 					}
-					r.retry = try
+					reruns++
+					r.retry = reruns
 					seqAttempts, seqErr = r.runSequence(ctx, seq, arm, repeat, seqBase, provenance)
 				}
 				r.retry = 0
@@ -857,18 +934,29 @@ func (r *Runner) binaryRevision() string {
 }
 
 // execArgs mirrors the production headless invocation used by the eval seam.
-func execArgs(arm Arm, model, sessionID, prompt string) []string {
-	args := []string{
-		"--no-trust", "exec",
+// With trustProject, no root trust flag is passed: the attempt trusts its
+// workspace through SPLICE_TRUST_WORKSPACE (see attemptEnv). Otherwise the
+// invocation keeps --no-trust.
+func execArgs(arm Arm, model, sessionID, prompt string, trustProject bool) []string {
+	var args []string
+	if !trustProject {
+		args = append(args, "--no-trust")
+	}
+	args = append(args, "exec",
 		"--output-format", "stream-json",
 		"--memory", arm.MemoryMode(),
 		"--init-session-id", sessionID,
-	}
+	)
 	if strings.TrimSpace(model) != "" {
 		args = append(args, "--model", model)
 	}
 	if arm == ArmLoop {
 		args = append(args, "--loop")
+	}
+	if arm == ArmDesign {
+		// The request is the value of --design. A positional prompt would be
+		// a usage error with --design.
+		return append(args, "--design", prompt)
 	}
 	return append(args, prompt)
 }
@@ -978,6 +1066,214 @@ func parsePipelineResult(stdout []byte) (schemas.PipelineResult, error) {
 	return result, nil
 }
 
+// applyAttemptLedger fills an attempt from its run's stream. The design arm
+// reads a design result, and every other arm reads a pipeline result. A run
+// reads only the result that its own arm produces.
+func applyAttemptLedger(attempt *Attempt, arm Arm, stdout []byte) error {
+	if arm == ArmDesign {
+		return applyDesignLedger(attempt, stdout)
+	}
+	return applyPipelineLedger(attempt, stdout)
+}
+
+// applyPipelineLedger fills an attempt from the final pipeline result.
+func applyPipelineLedger(attempt *Attempt, stdout []byte) error {
+	parsed, err := parsePipelineResult(stdout)
+	if err != nil {
+		return err
+	}
+	attempt.Requests = requestRecords(parsed.UsageRecords)
+	attempt.RunID = parsed.RunID
+	attempt.RunStatus = parsed.Status
+	attempt.CostCoverage = parsed.CostCoverage
+	attempt.Totals = totalsFromResult(parsed)
+	// Option B: decode the cache telemetry from the same final event with
+	// harness-local structs and merge it onto the typed records. A decode
+	// failure leaves the telemetry unreported, never reported as zero.
+	if tel, terr := parseCacheTelemetry(stdout); terr != nil {
+		attempt.LedgerError = terr.Error()
+	} else {
+		attempt.Requests = mergeCacheTelemetry(attempt.Requests, tel)
+		attempt.CacheTelemetryReported = tel.Reported
+		attempt.PromptLayoutFlips = tel.Flips
+	}
+	attempt.Rounds = computeRounds(attempt.Requests)
+	attempt.LayoutStability = computeLayoutStability(attempt.Requests)
+	return nil
+}
+
+// designStreamUsage is the part of a stream-json usage event that the design
+// ledger reads.
+type designStreamUsage struct {
+	Type             string   `json:"type"`
+	Stage            string   `json:"stage"`
+	Iteration        int      `json:"iteration"`
+	Provider         string   `json:"provider"`
+	Model            string   `json:"model"`
+	UsageReported    bool     `json:"usageReported"`
+	PromptTokens     int      `json:"promptTokens"`
+	CompletionTokens int      `json:"completionTokens"`
+	CachedTokens     int      `json:"cachedInputTokens"`
+	CacheWriteTokens int      `json:"cacheWriteTokens"`
+	ReasoningTokens  int      `json:"reasoningTokens"`
+	CostUSD          *float64 `json:"costUsd"`
+	CostStatus       string   `json:"costStatus"`
+}
+
+// applyDesignLedger fills an attempt from a --design run. The final event is
+// a design plan result, which carries no usage records. The ledger therefore
+// comes from the stream usage events, which name each request's stage. The
+// totals are summed from those records, because the design result has no
+// ledger totals to copy.
+//
+// The usage records are read first and kept even when the run has no final
+// result. A run that ends in an error still spent the requests it made, so
+// those records count toward the attempt, and the missing result is returned
+// as the ledger error.
+func applyDesignLedger(attempt *Attempt, stdout []byte) error {
+	records, err := designUsageRecords(stdout)
+	if err != nil {
+		return err
+	}
+	attempt.Requests = requestRecords(records)
+	attempt.Totals = totalsFromRecords(records)
+	attempt.Rounds = computeRounds(attempt.Requests)
+	attempt.LayoutStability = computeLayoutStability(attempt.Requests)
+
+	final, finalErr := designFinalResult(stdout)
+	if finalErr == nil {
+		attempt.RunID = final.PlanID
+		attempt.RunStatus = final.Status
+		attempt.CritiqueUnresolved = designCritiqueUnresolved(stdout)
+	}
+	attempt.CostCoverage = designCostCoverage(records, finalErr == nil)
+	return finalErr
+}
+
+// designFinalResult reads and validates the final design plan result.
+func designFinalResult(stdout []byte) (schemas.DesignPlanResult, error) {
+	finalText, err := finalEventText(stdout)
+	if err != nil {
+		return schemas.DesignPlanResult{}, fmt.Errorf("design run has no final result: %w", err)
+	}
+	var result schemas.DesignPlanResult
+	if err := json.Unmarshal([]byte(finalText), &result); err != nil {
+		return schemas.DesignPlanResult{}, fmt.Errorf("parse final design plan result: %w", err)
+	}
+	if err := result.Validate(); err != nil {
+		return schemas.DesignPlanResult{}, fmt.Errorf("final design plan result invalid: %w", err)
+	}
+	return result, nil
+}
+
+// designCostCoverage follows the pipeline ledger rule: not applicable with no
+// record, complete when every record is priced, partial when some are, and
+// unavailable when none is. A run without a valid final result is partial,
+// because it did not finish, whatever its records say.
+func designCostCoverage(records []schemas.PipelineUsageRecord, finished bool) string {
+	if !finished {
+		return schemas.CostCoveragePartial
+	}
+	priced := 0
+	for _, rec := range records {
+		if rec.CostStatus == schemas.CostStatusPriced {
+			priced++
+		}
+	}
+	switch {
+	case len(records) == 0:
+		return schemas.CostCoverageNotApplicable
+	case priced == len(records):
+		return schemas.CostCoverageComplete
+	case priced > 0:
+		return schemas.CostCoveragePartial
+	default:
+		return schemas.CostCoverageUnavailable
+	}
+}
+
+// designCritiqueUnresolved reads the critiqueResolved flag of the design_plan
+// event. A stream without the event, or with the flag unset, is not unresolved.
+func designCritiqueUnresolved(stdout []byte) bool {
+	scanner := bufio.NewScanner(bytes.NewReader(stdout))
+	scanner.Buffer(make([]byte, 0, 1<<20), 32<<20)
+	unresolved := false
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var ev struct {
+			Type             string `json:"type"`
+			CritiqueResolved *bool  `json:"critiqueResolved"`
+		}
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		if ev.Type == "design_plan" && ev.CritiqueResolved != nil && !*ev.CritiqueResolved {
+			unresolved = true
+		}
+	}
+	return unresolved
+}
+
+// designUsageRecords reads the usage events of a stream in order.
+func designUsageRecords(stdout []byte) ([]schemas.PipelineUsageRecord, error) {
+	scanner := bufio.NewScanner(bytes.NewReader(stdout))
+	scanner.Buffer(make([]byte, 0, 1<<20), 32<<20)
+	var records []schemas.PipelineUsageRecord
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var ev designStreamUsage
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		if ev.Type != "usage" {
+			continue
+		}
+		records = append(records, schemas.PipelineUsageRecord{
+			Sequence:      len(records) + 1,
+			Provider:      ev.Provider,
+			Model:         ev.Model,
+			Stage:         ev.Stage,
+			Iteration:     ev.Iteration,
+			UsageReported: ev.UsageReported,
+			InputTokens:   ev.PromptTokens,
+			OutputTokens:  ev.CompletionTokens,
+			CachedTokens:  ev.CachedTokens,
+			CacheWrite:    ev.CacheWriteTokens,
+			Reasoning:     ev.ReasoningTokens,
+			CostUSD:       ev.CostUSD,
+			CostStatus:    ev.CostStatus,
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan exec output: %w", err)
+	}
+	return records, nil
+}
+
+// totalsFromRecords sums the usage records of a design run. A request without
+// a reported cost is not priced, so it counts toward no billed amount.
+func totalsFromRecords(records []schemas.PipelineUsageRecord) Totals {
+	totals := Totals{Requests: len(records)}
+	for _, rec := range records {
+		totals.InputTokens += rec.InputTokens
+		totals.OutputTokens += rec.OutputTokens
+		totals.CachedTokens += rec.CachedTokens
+		totals.CacheWrite += rec.CacheWrite
+		totals.Reasoning += rec.Reasoning
+		if rec.CostUSD != nil {
+			totals.BilledUSD += *rec.CostUSD
+			totals.PricedRecords++
+		}
+	}
+	return totals
+}
+
 // totalsFromResult copies the authoritative ledger totals. Nothing is summed
 // by hand here.
 func totalsFromResult(result schemas.PipelineResult) Totals {
@@ -1048,6 +1344,25 @@ func envWithOverrides(base []string, overrides ...string) []string {
 		out = append(out, kv)
 	}
 	return append(out, overrides...)
+}
+
+// attemptEnv builds one attempt's child environment. The operator's
+// SPLICE_TRUST_WORKSPACE never reaches the child, so an ambient value cannot
+// change the trust of a measured run. With trustProject the child gets
+// SPLICE_TRUST_WORKSPACE=1, which trusts the workspace before the user's
+// defaultProjectTrust is read and does not write the trust store
+// (config.ResolveTrust, step 3).
+func attemptEnv(base []string, trustProject bool, overrides ...string) []string {
+	kept := make([]string, 0, len(base))
+	for _, kv := range base {
+		if !strings.HasPrefix(kv, "SPLICE_TRUST_WORKSPACE=") {
+			kept = append(kept, kv)
+		}
+	}
+	if trustProject {
+		overrides = append(overrides, "SPLICE_TRUST_WORKSPACE=1")
+	}
+	return envWithOverrides(kept, overrides...)
 }
 
 // runSequence prepares one workspace for the sequence and runs every task in
@@ -1147,6 +1462,7 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 		FixtureDigest:   fixtureDigest,
 		ModelID:         r.cfg.Model,
 		ModelSettings:   r.cfg.ModelSettings,
+		TrustProject:    r.cfg.TrustProject,
 		TreatmentEnv:    r.armEnv(arm),
 		SessionID:       sessionID,
 		StartedAt:       started,
@@ -1156,7 +1472,7 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 	if err := r.prepareSidecar(class); err != nil {
 		return attempt, err
 	}
-	env := envWithOverrides(os.Environ(), append(r.armEnv(arm), r.sidecarEnv(class)...)...)
+	env := attemptEnv(os.Environ(), r.cfg.TrustProject, append(r.armEnv(arm), r.sidecarEnv(class)...)...)
 	if arm.MemoryMode() == "on" {
 		if err := r.ensureSidecar(ctx, class, env); err != nil {
 			return attempt, &harnessError{taskID: task.ID, err: err}
@@ -1172,7 +1488,7 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 	defer cancel()
 	res, err := r.exec(runCtx, ExecRequest{
 		Binary:     r.cfg.Binary,
-		Args:       execArgs(arm, r.cfg.Model, sessionID, task.Prompt),
+		Args:       execArgs(arm, r.cfg.Model, sessionID, task.Prompt, r.cfg.TrustProject),
 		Env:        env,
 		Dir:        workspace,
 		OutputPath: rawPath,
@@ -1181,6 +1497,7 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 	attempt.EndedAt = ended
 	attempt.DurationMS = ended.Sub(started).Milliseconds()
 	attempt.UpstreamUnreachable = bytes.Contains(res.Stdout, []byte("upstream unreachable: ")) || endedOnConnectivity(res.Stdout)
+	attempt.RateLimited = endedOnRateLimit(res.Stdout)
 	attempt.MemoryUnavailable = arm.MemoryMode() == "on" && bytes.Contains(res.Stdout, []byte("memory sidecar unavailable"))
 	attempt.CredentialsMissing = bytes.Contains(res.Stdout, []byte("auth error: your API key is missing or invalid"))
 	if arm.MemoryMode() == "on" {
@@ -1209,26 +1526,8 @@ func (r *Runner) runTaskInWorkspace(ctx context.Context, task Task, arm Arm, rep
 		return attempt, fmt.Errorf("warmcost: write raw stream for task %s: %w", task.ID, werr)
 	}
 
-	if parsed, perr := parsePipelineResult(res.Stdout); perr != nil {
-		attempt.LedgerError = perr.Error()
-	} else {
-		attempt.Requests = requestRecords(parsed.UsageRecords)
-		attempt.RunID = parsed.RunID
-		attempt.RunStatus = parsed.Status
-		attempt.CostCoverage = parsed.CostCoverage
-		attempt.Totals = totalsFromResult(parsed)
-		// Option B: decode the cache telemetry from the same final event with
-		// harness-local structs and merge it onto the typed records. A decode
-		// failure leaves the telemetry unreported, never reported as zero.
-		if tel, terr := parseCacheTelemetry(res.Stdout); terr != nil {
-			attempt.LedgerError = terr.Error()
-		} else {
-			attempt.Requests = mergeCacheTelemetry(attempt.Requests, tel)
-			attempt.CacheTelemetryReported = tel.Reported
-			attempt.PromptLayoutFlips = tel.Flips
-		}
-		attempt.Rounds = computeRounds(attempt.Requests)
-		attempt.LayoutStability = computeLayoutStability(attempt.Requests)
+	if err := applyAttemptLedger(&attempt, arm, res.Stdout); err != nil {
+		attempt.LedgerError = err.Error()
 	}
 
 	verified, output, verr := runVerifier(runCtx, workspace, task.Check)
@@ -1467,6 +1766,7 @@ func (r *Runner) failedAttempt(task Task, arm Arm, repeat, seqIndex, seqOrdinal,
 		SidecarRevision: prov.SidecarRevision,
 		ModelID:         r.cfg.Model,
 		ModelSettings:   r.cfg.ModelSettings,
+		TrustProject:    r.cfg.TrustProject,
 		TreatmentEnv:    r.armEnv(arm),
 		RunStatus:       "infrastructure_failed",
 		CostCoverage:    schemas.CostCoveragePartial,

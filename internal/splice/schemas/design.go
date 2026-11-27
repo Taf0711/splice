@@ -1,8 +1,11 @@
 package schemas
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // AcceptanceFact is one machine-checkable acceptance criterion for a task.
@@ -105,6 +108,69 @@ type PlanCritique struct {
 	OverallAssessment      string `json:"overall_assessment"`
 }
 
+// UnmarshalJSON accepts critiques and cross_cutting_concerns either as a JSON
+// array or as a JSON string whose content is that array. Some models encode
+// the array as a string. An empty string means an empty list. Any other shape
+// is an error.
+func (p *PlanCritique) UnmarshalJSON(data []byte) error {
+	type plain PlanCritique
+	aux := struct {
+		*plain
+		Critiques            json.RawMessage `json:"critiques,omitempty"`
+		CrossCuttingConcerns json.RawMessage `json:"cross_cutting_concerns,omitempty"`
+	}{plain: (*plain)(p)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if err := decodeArrayOrStringArray(aux.Critiques, &p.Critiques); err != nil {
+		return fmt.Errorf("critiques: %w", err)
+	}
+	if err := decodeConcernList(aux.CrossCuttingConcerns, &p.CrossCuttingConcerns); err != nil {
+		return fmt.Errorf("cross_cutting_concerns: %w", err)
+	}
+	return nil
+}
+
+// decodeConcernList decodes cross_cutting_concerns. A JSON string that is not
+// a JSON array becomes a one-item list that holds the trimmed string. A blank
+// string is an empty list. Other shapes use decodeArrayOrStringArray.
+func decodeConcernList(raw json.RawMessage, dst *[]string) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err != nil {
+			return err
+		}
+		content := strings.TrimSpace(s)
+		if content != "" && !(content[0] == '[' && json.Valid([]byte(content))) {
+			*dst = []string{content}
+			return nil
+		}
+	}
+	return decodeArrayOrStringArray(raw, dst)
+}
+
+// decodeArrayOrStringArray decodes raw into dst. raw is a JSON array, or a
+// JSON string whose content is a JSON array. An absent field leaves dst alone.
+func decodeArrayOrStringArray[T any](raw json.RawMessage, dst *[]T) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var encoded string
+		if err := json.Unmarshal(trimmed, &encoded); err != nil {
+			return err
+		}
+		if strings.TrimSpace(encoded) == "" {
+			*dst = []T{}
+			return nil
+		}
+		trimmed = []byte(encoded)
+	}
+	return json.Unmarshal(trimmed, dst)
+}
+
 // Validate checks the plan critique.
 func (p PlanCritique) Validate() error {
 	if p.OverallAssessment == "" {
@@ -113,17 +179,21 @@ func (p PlanCritique) Validate() error {
 	if err := p.ValidateStructure(); err != nil {
 		return err
 	}
-	qualifies := false
-	for _, c := range p.Critiques {
-		if c.Severity == SeverityHigh || c.Severity == SeverityCritical {
-			qualifies = true
-			break
-		}
-	}
-	if p.MustFixBeforeExecution != qualifies {
+	if p.MustFixBeforeExecution != p.BlocksExecution() {
 		return fmt.Errorf("must_fix_before_execution=%t does not match highest critique severity; high or critical severity requires true and lower or empty severity requires false", p.MustFixBeforeExecution)
 	}
 	return nil
+}
+
+// BlocksExecution reports whether a critique has high or critical severity.
+// MustFixBeforeExecution must equal this value.
+func (p PlanCritique) BlocksExecution() bool {
+	for _, c := range p.Critiques {
+		if c.Severity == SeverityHigh || c.Severity == SeverityCritical {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateStructure checks persisted critique fields without applying the

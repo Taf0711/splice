@@ -15,6 +15,7 @@ type RestoreReport struct {
 	FilesRestored  int      `json:"filesRestored"`
 	FilesDeleted   int      `json:"filesDeleted"`
 	Skipped        []string `json:"skipped,omitempty"` // paths whose before-state was not recoverable
+	Failed         []string `json:"failed,omitempty"`  // paths whose recoverable before-state could not be written
 }
 
 // RewindMarker is the payload of the EventSessionRewind event appended after a rewind.
@@ -107,7 +108,7 @@ func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, tar
 				if err := os.Remove(abs); err == nil || os.IsNotExist(err) {
 					report.FilesDeleted++
 				} else {
-					report.Skipped = append(report.Skipped, f.Path)
+					report.Failed = append(report.Failed, f.Path)
 				}
 			case f.Blob != "":
 				content, rerr := store.readBlob(sessionID, f.Blob)
@@ -116,7 +117,7 @@ func (store *Store) restoreToSequenceLocked(sessionID, workspaceRoot string, tar
 					continue
 				}
 				if err := store.writeFileAtomic(abs, content, f.Mode); err != nil {
-					report.Skipped = append(report.Skipped, f.Path)
+					report.Failed = append(report.Failed, f.Path)
 					continue
 				}
 				report.FilesRestored++
@@ -231,7 +232,8 @@ func (store *Store) truncateEventsLocked(sessionID string, keepThroughSequence i
 
 // ApplyRewind performs a full safe rewind: restore workspace files to targetSeq,
 // truncate the event log, prune now-orphaned blobs, and append an EventSessionRewind
-// marker. Returns the restore report.
+// marker. Returns the restore report. When a file write fails, it returns an
+// error and leaves the log, blobs, and marker unchanged.
 func (store *Store) ApplyRewind(sessionID, workspaceRoot string, targetSeq int) (RestoreReport, error) {
 	if !ValidSessionID(sessionID) {
 		return RestoreReport{TargetSequence: targetSeq}, fmt.Errorf("invalid splice session id %q", sessionID)
@@ -250,6 +252,11 @@ func (store *Store) ApplyRewind(sessionID, workspaceRoot string, targetSeq int) 
 	if err != nil {
 		return report, err
 	}
+	// Keep the log when a write failed: its checkpoints still hold the
+	// original bytes, so the rewind can be retried.
+	if len(report.Failed) > 0 {
+		return report, fmt.Errorf("rewind left %d file(s) unrestored (%s); the session log was kept, fix the error and rewind again", len(report.Failed), summarizePaths(report.Failed, 5))
+	}
 	if err := store.truncateEventsLocked(sessionID, targetSeq); err != nil {
 		return report, err
 	}
@@ -261,6 +268,14 @@ func (store *Store) ApplyRewind(sessionID, workspaceRoot string, targetSeq int) 
 		return report, err
 	}
 	return report, nil
+}
+
+// summarizePaths joins up to limit paths and notes how many more were left out.
+func summarizePaths(paths []string, limit int) string {
+	if len(paths) <= limit {
+		return strings.Join(paths, ", ")
+	}
+	return fmt.Sprintf("%s, and %d more", strings.Join(paths[:limit], ", "), len(paths)-limit)
 }
 
 // writeFileAtomic writes content to path via a temp file + rename. mode is the

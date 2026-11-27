@@ -617,13 +617,17 @@ func prepareStageInput(ctx context.Context, p stageInputPreparation) (schemas.Ha
 		}
 	}
 
-	compactedInput, _, cerr := compactStageInput(input.StageName, p.Budget, p.Tier, input, func(msg string) {
-		emitProgress(p.Options, msg+"\n")
-	})
-	if cerr != nil {
-		return input, StageScopePlan{}, ScopeSuppression{}, fmt.Errorf("stage %s: %w", input.StageName, cerr)
+	// A model-free stage makes no provider call, so it has no prompt to fit
+	// and no input token budget to enforce.
+	if !caps.ModelFree {
+		compactedInput, _, cerr := compactStageInput(input.StageName, p.Budget, p.Tier, input, func(msg string) {
+			emitProgress(p.Options, msg+"\n")
+		})
+		if cerr != nil {
+			return input, StageScopePlan{}, ScopeSuppression{}, fmt.Errorf("stage %s: %w", input.StageName, cerr)
+		}
+		input = compactedInput
 	}
-	input = compactedInput
 
 	// Post-compaction trace accounting: counts describe delivered memory.
 	if p.Trace != nil && input.MemoryBundle != nil {

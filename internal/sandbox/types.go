@@ -268,6 +268,30 @@ func DefaultPolicy() Policy {
 	}
 }
 
+// StagePolicy derives the policy of the deterministic pipeline stages that run
+// repository code (tests, scanners, acceptance commands, command nodes) from a
+// user policy. Only the restrictions of base carry over: its DenyRead,
+// DenyWrite, and BlockUnixSockets. Nothing that widens base carries over: the
+// allow lists, the network mode, denial monitoring, and a disabled mode are
+// dropped. The result is enforce mode, network deny, writes in the workspace,
+// and a read deny on the default credential directories and on the credential
+// files. Interactive commands keep the credential files readable (see
+// credentialFileDenyPaths); stage commands have no network, so they do not
+// need them. tempRoot, when set, is the only temp directory the command can
+// write.
+func StagePolicy(base Policy, tempRoot string) Policy {
+	denyRead := append(append([]string(nil), base.DenyRead...), defaultDenyReadPaths()...)
+	return Policy{
+		Mode:             ModeEnforce,
+		Network:          NetworkDeny,
+		EnforceWorkspace: true,
+		BlockUnixSockets: base.BlockUnixSockets,
+		DenyRead:         dedupeStrings(append(denyRead, credentialFileDenyPaths()...)),
+		DenyWrite:        append([]string(nil), base.DenyWrite...),
+		TempRoot:         tempRoot,
+	}
+}
+
 // credentialFileDenyPaths lists credential files and directories that the
 // in-process file tools (read_file, grep, glob) must not read. They are not in
 // DenyRead, so the OS profile of a shell command does not change: git, npm,

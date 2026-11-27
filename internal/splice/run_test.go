@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -111,6 +113,67 @@ func (runFailingProvider) StreamCompletion(ctx context.Context, request zerorunt
 	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
 	close(ch)
 	return ch, nil
+}
+
+// varyingFailureProvider fails every code_writer call with a compile error
+// that names a call-specific symbol. Each repair therefore brings new
+// evidence and the no-progress guard does not stall. A call count below
+// failFirst still fails. Later calls succeed, as in the fake provider. always
+// keeps every call failing.
+type varyingFailureProvider struct {
+	codeCalls int
+	failFirst int
+	always    bool
+}
+
+func (p *varyingFailureProvider) StreamCompletion(ctx context.Context, request zeroruntime.CompletionRequest) (<-chan zeroruntime.StreamEvent, error) {
+	if len(request.Tools) > 0 && request.Tools[0].Name == "submit_code" {
+		p.codeCalls++
+	}
+	if len(request.Tools) > 0 && request.Tools[0].Name == "submit_step_back" {
+		// The rule engine can ask for a step-back analysis. Answer it, so the
+		// auxiliary call does not fail the run.
+		b, _ := json.Marshal(schemas.StepBackAnalysis{
+			HypothesizedRootCause: "Hello refers to an undefined symbol.",
+			RecommendedApproach:   "Return a string literal from Hello.",
+		})
+		return singleToolStream("submit_step_back", string(b)), nil
+	}
+	if p.always || p.codeCalls <= p.failFirst {
+		if len(request.Tools) > 0 && request.Tools[0].Name == "submit_code" {
+			out := schemas.CodeWriterOutput{
+				Files: []schemas.FileChange{
+					{Path: "main.go", Content: fmt.Sprintf("package main\n\nfunc Hello() string { return undefinedValue%d }\n", p.codeCalls), ChangeType: "modify"},
+				},
+				Language:   "go",
+				Intent:     "add broken Hello function",
+				Confidence: 0.95,
+			}
+			b, _ := json.Marshal(out)
+			ch := make(chan zeroruntime.StreamEvent, 8)
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "1", ToolName: "submit_code"}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "1", ArgumentsFragment: string(b)}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "1"}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 10, OutputTokens: 5}}
+			ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+			close(ch)
+			return ch, nil
+		}
+		return (runFailingProvider{}).StreamCompletion(ctx, request)
+	}
+	return (runFakeProvider{}).StreamCompletion(ctx, request)
+}
+
+// singleToolStream streams one tool call with the given arguments.
+func singleToolStream(name, args string) <-chan zeroruntime.StreamEvent {
+	ch := make(chan zeroruntime.StreamEvent, 8)
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallStart, ToolCallID: "1", ToolName: name}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallDelta, ToolCallID: "1", ArgumentsFragment: args}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventToolCallEnd, ToolCallID: "1"}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventUsage, Usage: zeroruntime.Usage{InputTokens: 5, OutputTokens: 3}}
+	ch <- zeroruntime.StreamEvent{Type: zeroruntime.StreamEventDone}
+	close(ch)
+	return ch
 }
 
 type stubStore struct {
@@ -491,6 +554,149 @@ func TestRunPassCarriesWriterChangedPathsToTestGenerator(t *testing.T) {
 	}
 	if got := testInput.PriorChangedFiles["code_writer"]; len(got) != 1 || got[0] != "storage.go" {
 		t.Fatalf("test generator prior changed files = %v, want [storage.go]", got)
+	}
+}
+
+// runExpandedTestCommand runs a configured test command with {tests} through
+// runPass and returns the argv the test runner recorded. The writer output
+// comes from writer, and the test runner depends only on static_analyzer, as
+// the default topology does.
+func runExpandedTestCommand(t *testing.T, writer string, writerOut schemas.HarnessStageOutput, runnerName string) []string {
+	t.Helper()
+	workDir := t.TempDir()
+	// The changed test file must exist, or the expansion drops it.
+	if err := os.MkdirAll(filepath.Join(workDir, "pkg", "tests"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "pkg", "tests", "test_x.py"), []byte("def test_x():\n    pass\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	var argv []string
+	runTests := stageFunc(func(ctx context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+		out, err := stages.TestRunner{}.Run(ctx, input, nil, stages.StageOptions{
+			WorkDir:        workDir,
+			CommandWorkDir: workDir,
+			Command:        []string{"python", "bin/test", "-C", "{tests}"},
+			RunTool: func(context.Context, string, map[string]any) (stages.ToolResult, error) {
+				return stages.ToolResult{OK: true, Output: "ok"}, nil
+			},
+		})
+		if err == nil {
+			argv = out.Data["test_results"].(schemas.TestRunResults).Command
+		}
+		return out, err
+	})
+	plan := schemas.ExecutionPlan{
+		Tier: schemas.TierStandard, RequestIntent: "fix and test",
+		Stages: []schemas.ExecutionStage{{Name: "code_writer"}},
+	}
+	registry := stageRegistry{
+		"code_writer": outputStage{output: schemas.HarnessStageOutput{Summary: "wrote code", Confidence: 1}},
+	}
+	if writer != "code_writer" {
+		plan.Stages = append(plan.Stages, schemas.ExecutionStage{Name: writer, DependsOn: []string{"code_writer"}})
+		registry[writer] = outputStage{output: writerOut}
+	} else {
+		registry["code_writer"] = outputStage{output: writerOut}
+	}
+	plan.Stages = append(plan.Stages,
+		schemas.ExecutionStage{Name: "static_analyzer", DependsOn: []string{"code_writer"}},
+	)
+	if runnerName != "test_runner" {
+		// A first test runner node, so the second one is not the role's first.
+		plan.Stages = append(plan.Stages, schemas.ExecutionStage{Name: "test_runner", Type: "test_runner", DependsOn: []string{"static_analyzer"}})
+	}
+	plan.Stages = append(plan.Stages, schemas.ExecutionStage{Name: runnerName, Type: "test_runner", DependsOn: []string{"static_analyzer"}})
+	registry["static_analyzer"] = outputStage{output: schemas.HarnessStageOutput{Summary: "clean", Confidence: 1}}
+	registry[runnerName] = runTests
+	if runnerName != "test_runner" {
+		registry["test_runner"] = outputStage{output: schemas.HarnessStageOutput{Summary: "first runner", Confidence: 1}}
+	}
+	if _, _, completed, err := runPass(context.Background(), "run-expand-tests", 1, plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir, nil, time.Time{}, nil, nil, nil, NewStageExecutionBudget(0)); err != nil || !completed {
+		t.Fatalf("runPass: completed=%v err=%v", completed, err)
+	}
+	return argv
+}
+
+// The configured {tests} placeholder must see the test file that an earlier
+// write stage changed, even when the test runner does not depend on that
+// stage. Without this the whole suite runs.
+func TestRunPassTestRunnerExpandsTestsFromEarlierWriters(t *testing.T) {
+	const testFile = "pkg/tests/test_x.py"
+	out := schemas.HarnessStageOutput{Summary: "wrote test", Confidence: 1, ChangedFiles: []string{testFile}}
+	t.Run("default topology code writer", func(t *testing.T) {
+		argv := runExpandedTestCommand(t, "code_writer", out, "test_runner")
+		if !slices.Contains(argv, testFile) {
+			t.Fatalf("test command = %v, want it to include %s", argv, testFile)
+		}
+	})
+	t.Run("standard tier test generator", func(t *testing.T) {
+		argv := runExpandedTestCommand(t, "test_generator", out, "test_runner")
+		if !slices.Contains(argv, testFile) {
+			t.Fatalf("test command = %v, want it to include %s", argv, testFile)
+		}
+	})
+	// A second test runner node, named by its kind rather than the role name,
+	// gets the same run-wide changed files.
+	t.Run("custom test runner node", func(t *testing.T) {
+		argv := runExpandedTestCommand(t, "code_writer", out, "verify")
+		if !slices.Contains(argv, testFile) {
+			t.Fatalf("test command = %v, want it to include %s", argv, testFile)
+		}
+	})
+}
+
+// A test file that pass 1 wrote must still reach the test runner in pass 2,
+// when pass 2 changes nothing itself.
+func TestRunIterationLoopCarriesChangedFilesAcrossPasses(t *testing.T) {
+	writes := 0
+	var runnerSeen []map[string][]string
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writes++
+			out := schemas.HarnessStageOutput{Summary: "wrote code", Confidence: 1}
+			if writes == 1 {
+				out.ChangedFiles = []string{"pkg/tests/test_x.py"}
+			}
+			return out, nil
+		}),
+		"static_analyzer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			report := schemas.VerificationReport{Status: schemas.VerificationPassed, Complete: true, Summary: "clean"}
+			if writes == 1 {
+				report = schemas.VerificationReport{
+					Status: schemas.VerificationFindings, Complete: true, Summary: "one finding",
+					Tools:    []schemas.VerificationToolRun{{Tool: "python_syntax", Required: true, Scope: "quality", Status: schemas.VerificationFindings, Summary: "one finding"}},
+					Findings: []schemas.VerificationFinding{{Tool: "python_syntax", Authority: "deterministic", RuleID: "PY_COMPILE", Category: "quality", Path: "pkg/tests/test_x.py", Message: "fix it", Severity: schemas.SeverityHigh}},
+				}
+			}
+			if err := report.Validate(); err != nil {
+				return schemas.HarnessStageOutput{}, err
+			}
+			return schemas.HarnessStageOutput{Summary: report.Summary, Confidence: 1, Data: map[string]any{VerificationReportKey: report}}, nil
+		}),
+		"test_runner": stageFunc(func(_ context.Context, input schemas.HarnessStageInput, _ zeroruntime.Provider, _ stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			runnerSeen = append(runnerSeen, input.RunChangedFiles)
+			return schemas.HarnessStageOutput{Summary: "tests ran", Confidence: 1}, nil
+		}),
+	}
+	plan := schemas.ExecutionPlan{
+		Tier: schemas.TierStandard, RequestIntent: "fix the syntax error and test it",
+		Stages: []schemas.ExecutionStage{
+			{Name: "code_writer"},
+			{Name: "test_runner", DependsOn: []string{"code_writer"}},
+			{Name: "static_analyzer", DependsOn: []string{"code_writer"}},
+		},
+	}
+	result, err := runIterationLoop(context.Background(), "run-pass-accumulation", plan, registry, runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if writes < 2 || len(runnerSeen) < 2 {
+		t.Fatalf("writes = %d, test runs = %d, want a second pass (status %q)", writes, len(runnerSeen), result.Status)
+	}
+	last := runnerSeen[len(runnerSeen)-1]
+	if !slices.Contains(last["code_writer"], "pkg/tests/test_x.py") {
+		t.Fatalf("pass 2 test runner changed files = %v, want the pass 1 test file", last)
 	}
 }
 
@@ -1636,7 +1842,7 @@ func TestRunStreamsStageToolArguments(t *testing.T) {
 func TestRunMaxTurnsDoesNotCapPipelineIterations(t *testing.T) {
 	workDir, registry := newRunTestWorkspace(t)
 
-	result, err := Run(context.Background(), "add a security service with tests", runFailingProvider{}, agent.Options{
+	result, err := Run(context.Background(), "add a security service with tests", &varyingFailureProvider{always: true}, agent.Options{
 		Cwd:            workDir,
 		Registry:       registry,
 		PermissionMode: agent.PermissionModeAuto,
@@ -2283,47 +2489,305 @@ func TestRunIterationLoopVerifiedOnlyWhenACheckPasses(t *testing.T) {
 	}
 }
 
-// TestPassVerificationRules pins which records and reports verify a pass.
+// pytestFixtureTestRun runs the captured pytest all-pass JUnit report (from the
+// stages package testdata) through the test runner stage. The stub writes the
+// report to the path the command names, as pytest would.
+func pytestFixtureTestRun(t *testing.T) schemas.HarnessStageOutput {
+	t.Helper()
+	report, err := os.ReadFile(filepath.Join("stages", "testdata", "pytest", "all_pass.xml"))
+	if err != nil {
+		t.Fatalf("setup: read pytest fixture: %v", err)
+	}
+	out, err := (stages.TestRunner{}).Run(context.Background(), schemas.HarnessStageInput{}, nil, stages.StageOptions{
+		WorkDir: t.TempDir(),
+		Command: []string{"python3", "-m", "pytest"},
+		RunTool: func(_ context.Context, _ string, args map[string]any) (stages.ToolResult, error) {
+			command, _ := args["command"].(string)
+			match := regexp.MustCompile(`--junitxml=([^'\s]+)`).FindStringSubmatch(command)
+			if match == nil {
+				return stages.ToolResult{}, fmt.Errorf("setup: no --junitxml path in %q", command)
+			}
+			if err := os.WriteFile(match[1], report, 0o600); err != nil {
+				return stages.ToolResult{}, err
+			}
+			return stages.ToolResult{OK: true, Meta: map[string]string{"exit_code": "0"}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("setup: stage run: %v", err)
+	}
+	return out
+}
+
+// unmatchedConfiguredTestsRun runs a {tests} command for a change with no
+// matching test file. The command must not run, and the stage output must
+// record that no tests ran.
+func unmatchedConfiguredTestsRun(t *testing.T) schemas.HarnessStageOutput {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("docs\n"), 0o600); err != nil {
+		t.Fatalf("setup: write README: %v", err)
+	}
+	input := schemas.HarnessStageInput{RunChangedFiles: map[string][]string{"code_writer": {"README.md"}}}
+	out, err := (stages.TestRunner{}).Run(context.Background(), input, nil, stages.StageOptions{
+		WorkDir:        root,
+		Command:        []string{"python", "-m", "pytest", "-q", "{tests}"},
+		CommandWorkDir: root,
+		RunTool: func(context.Context, string, map[string]any) (stages.ToolResult, error) {
+			t.Fatal("configured test command ran with no matching test file")
+			return stages.ToolResult{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("setup: stage run: %v", err)
+	}
+	return out
+}
+
+// The receipt reads "Tests: no tests ran" for an unmatched configured command.
+func TestUnmatchedConfiguredTestsCheckRecordsNoTests(t *testing.T) {
+	results := unmatchedConfiguredTestsRun(t).Data["test_results"].(schemas.TestRunResults)
+	outcome, detail := testsCheckOutcome(results)
+	if outcome != schemas.CheckNoTests || detail != "no tests ran" {
+		t.Fatalf("outcome = %q, detail = %q; want no_tests and %q", outcome, detail, "no tests ran")
+	}
+}
+
+// TestPassVerificationRules pins which records and reports verify a pass, and
+// the outcome each pass gets.
 func TestPassVerificationRules(t *testing.T) {
 	passedReport := func() schemas.HarnessStageOutput {
 		return schemas.HarnessStageOutput{Data: map[string]any{VerificationReportKey: schemas.VerificationReport{Status: schemas.VerificationPassed, Complete: true, Summary: "ok"}}}
 	}
-	noTests := schemas.HarnessStageOutput{Data: map[string]any{"test_results": schemas.TestRunResults{Command: []string{"<none>"}, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped"}}}}}
-	ranTests := schemas.HarnessStageOutput{Data: map[string]any{"test_results": schemas.TestRunResults{Command: []string{"go", "test"}, Tests: []schemas.TestCaseResult{{Name: "TestA", Status: "passed"}}}}}
-	failedTests := schemas.HarnessStageOutput{Data: map[string]any{"test_results": schemas.TestRunResults{Command: []string{"go", "test"}, Tests: []schemas.TestCaseResult{{Name: "TestA", Status: "failed"}}}}}
+	testsOutput := func(results schemas.TestRunResults) schemas.HarnessStageOutput {
+		return schemas.HarnessStageOutput{Data: map[string]any{"test_results": results}}
+	}
+	noTests := testsOutput(schemas.TestRunResults{Command: []string{"<none>"}, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped"}}})
+	ranTests := testsOutput(schemas.TestRunResults{Command: []string{"go", "test"}, Evidence: schemas.TestEvidencePerTest, Tests: []schemas.TestCaseResult{{Name: "example.com/m.TestA", Package: "example.com/m", Status: "passed"}}})
+	failedTests := testsOutput(schemas.TestRunResults{Command: []string{"go", "test"}, ExitCode: 1, Evidence: schemas.TestEvidencePerTest, Tests: []schemas.TestCaseResult{{Name: "TestA", Status: "failed"}}})
+	// Go exit 0 with zero parsed tests (the test runner stage output).
+	zeroGoTests := testsOutput(schemas.TestRunResults{Command: []string{"go", "test", "-json", "./..."}, Evidence: schemas.TestEvidenceNone, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped", Message: "no tests ran"}}})
+	// Non-Go exit 0: the command succeeded, no per-test evidence.
+	commandOnly := testsOutput(schemas.TestRunResults{Command: []string{"pytest"}, Evidence: schemas.TestEvidenceCommandOnly, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped", Message: "command succeeded; per-test evidence unavailable"}}})
+	// A command_only run that exited non-zero is a failed suite, never
+	// command_passed.
+	commandOnlyFailed := testsOutput(schemas.TestRunResults{Command: []string{"pytest"}, ExitCode: 1, Evidence: schemas.TestEvidenceCommandOnly, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "failed", Message: "exit code 1"}}})
 	skipped := schemas.StageRecord{Name: "static_analyzer", Status: schemas.StageSkipped, OutputSummary: Ptr("No applicable files to verify.")}
 	// A report with no applicable checks is never a pass, even when an
 	// optional tool was missing.
 	notApplicable := schemas.HarnessStageOutput{Data: map[string]any{VerificationReportKey: schemas.VerificationReport{Status: schemas.VerificationNotApplicable, Complete: true, Summary: "nothing to verify"}}}
 
+	// A real pytest run: the fixture goes through the test runner stage, so
+	// the parser builds the results that passVerification reads.
+	pytestRun := pytestFixtureTestRun(t)
+	unmatchedTests := unmatchedConfiguredTestsRun(t)
+	const (
+		verified      = schemas.VerificationOutcomeVerified
+		unverified    = schemas.VerificationOutcomeUnverified
+		commandPassed = schemas.VerificationOutcomeCommandPassed
+	)
 	tests := []struct {
-		name       string
-		records    []schemas.StageRecord
-		outputs    []schemas.HarnessStageOutput
-		wantOK     bool
-		wantReason string
+		name        string
+		records     []schemas.StageRecord
+		outputs     []schemas.HarnessStageOutput
+		wantOutcome string
+		wantReason  string
 	}{
-		{name: "passed report", outputs: []schemas.HarnessStageOutput{passedReport()}, wantOK: true},
-		{name: "not-applicable report never verifies", outputs: []schemas.HarnessStageOutput{notApplicable}, wantReason: "no verification check passed"},
-		{name: "tests ran and passed", outputs: []schemas.HarnessStageOutput{ranTests}, wantOK: true},
-		{name: "tests failed do not verify", outputs: []schemas.HarnessStageOutput{failedTests}, wantReason: "no verification check passed"},
-		{name: "skipped check names the stage", records: []schemas.StageRecord{skipped}, wantReason: "no check applied: static_analyzer (No applicable files to verify.)"},
-		{name: "no tests ran", outputs: []schemas.HarnessStageOutput{noTests}, wantReason: "no check applied: tests (no tests ran)"},
-		{name: "incomplete stage never verifies", records: []schemas.StageRecord{{Name: "static_analyzer", Status: schemas.StageIncomplete}}, outputs: []schemas.HarnessStageOutput{passedReport()}, wantReason: "verification did not finish at stage static_analyzer"},
+		{name: "passed report", outputs: []schemas.HarnessStageOutput{passedReport()}, wantOutcome: verified},
+		{name: "not-applicable report never verifies", outputs: []schemas.HarnessStageOutput{notApplicable}, wantOutcome: unverified, wantReason: "no verification check passed"},
+		{name: "per-test pass verifies", outputs: []schemas.HarnessStageOutput{ranTests}, wantOutcome: verified},
+		{name: "parsed pytest run verifies", outputs: []schemas.HarnessStageOutput{pytestRun}, wantOutcome: verified},
+		{name: "tests failed do not verify", outputs: []schemas.HarnessStageOutput{failedTests}, wantOutcome: unverified, wantReason: "tests failed"},
+		{name: "failed tests beat a passed report", outputs: []schemas.HarnessStageOutput{passedReport(), failedTests}, wantOutcome: unverified, wantReason: "tests failed"},
+		{name: "failed tests beat passed tests in another run", outputs: []schemas.HarnessStageOutput{ranTests, failedTests}, wantOutcome: unverified, wantReason: "tests failed"},
+		{name: "skipped check names the stage", records: []schemas.StageRecord{skipped}, wantOutcome: unverified, wantReason: "no check applied: static_analyzer (No applicable files to verify.)"},
+		{name: "no tests ran", outputs: []schemas.HarnessStageOutput{noTests}, wantOutcome: unverified, wantReason: "no check applied: tests (no tests ran)"},
+		{name: "unmatched configured test command never verifies", outputs: []schemas.HarnessStageOutput{unmatchedTests}, wantOutcome: unverified, wantReason: "no check applied: tests (no tests ran)"},
+		{name: "zero go tests ran", outputs: []schemas.HarnessStageOutput{zeroGoTests}, wantOutcome: unverified, wantReason: "no check applied: tests (no tests ran)"},
+		{name: "command only alone is command_passed", outputs: []schemas.HarnessStageOutput{commandOnly}, wantOutcome: commandPassed, wantReason: "test command passed; per-test evidence unavailable"},
+		{name: "command only with a skipped check keeps the command reason", records: []schemas.StageRecord{skipped}, outputs: []schemas.HarnessStageOutput{commandOnly}, wantOutcome: commandPassed, wantReason: "test command passed; per-test evidence unavailable"},
+		{name: "command only plus passed report verifies", outputs: []schemas.HarnessStageOutput{commandOnly, passedReport()}, wantOutcome: verified},
+		{name: "command only that failed is tests failed", outputs: []schemas.HarnessStageOutput{commandOnlyFailed}, wantOutcome: unverified, wantReason: "tests failed"},
+		{name: "incomplete stage never verifies", records: []schemas.StageRecord{{Name: "static_analyzer", Status: schemas.StageIncomplete}}, outputs: []schemas.HarnessStageOutput{passedReport()}, wantOutcome: unverified, wantReason: "verification did not finish at stage static_analyzer"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ok, reason := passVerification(tt.records, tt.outputs)
-			if ok != tt.wantOK {
-				t.Fatalf("verified = %v, want %v (reason %q)", ok, tt.wantOK, reason)
+			outcome, reason, _ := passVerification(schemas.ExecutionPlan{}, tt.records, tt.outputs)
+			if outcome != tt.wantOutcome {
+				t.Fatalf("outcome = %q, want %q (reason %q)", outcome, tt.wantOutcome, reason)
 			}
 			if tt.wantReason != "" && reason != tt.wantReason {
 				t.Fatalf("reason = %q, want %q", reason, tt.wantReason)
 			}
-			if ok && reason != "" {
+			if outcome == verified && reason != "" {
 				t.Fatalf("verified run has reason %q", reason)
 			}
+			if outcome != verified && reason == "" {
+				t.Fatalf("outcome %q has no reason", outcome)
+			}
 		})
+	}
+}
+
+// TestPassVerificationChecks pins the per-check list of a pass: every check
+// outcome, the kind of each stage, and the consistency rule that a verified
+// pass has a passed check and no failed check. The scanner-only case is
+// VERIFIED, and its tests check says no tests ran.
+func TestPassVerificationChecks(t *testing.T) {
+	plan := schemas.ExecutionPlan{Stages: []schemas.ExecutionStage{
+		{Name: "code_writer", Type: "code_writer"},
+		{Name: "unit_tests", Type: "test_runner"},
+		{Name: "acceptance_verifier", Type: "acceptance_verifier"},
+		{Name: "security_auditor", Type: "security_auditor"},
+		{Name: "static_analyzer", Type: "static_analyzer"},
+		{Name: "lint_gate", Type: schemas.NodeTypePrompt, Caps: &schemas.NodeCapabilities{ProducesVerification: true}},
+	}}
+	completed := func(name string) schemas.StageRecord {
+		return schemas.StageRecord{Name: name, Status: schemas.StageCompleted}
+	}
+	out := func(stage string, data map[string]any) schemas.HarnessStageOutput {
+		return schemas.HarnessStageOutput{Stage: stage, Data: data}
+	}
+	tests := func(results schemas.TestRunResults) schemas.HarnessStageOutput {
+		return out("unit_tests", map[string]any{"test_results": results})
+	}
+	passedTests := tests(schemas.TestRunResults{Command: []string{"go", "test"}, Evidence: schemas.TestEvidencePerTest, Tests: []schemas.TestCaseResult{{Name: "a.TestA", Status: "passed"}, {Name: "a.TestB", Status: "passed"}}})
+	failedTests := tests(schemas.TestRunResults{Command: []string{"go", "test"}, ExitCode: 1, Evidence: schemas.TestEvidencePerTest, Tests: []schemas.TestCaseResult{{Name: "a.TestA", Status: "passed"}, {Name: "a.TestB", Status: "failed"}}})
+	noTests := tests(schemas.TestRunResults{Command: []string{"go", "test"}, Evidence: schemas.TestEvidenceNone, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped"}}})
+	commandOnly := tests(schemas.TestRunResults{Command: []string{"make", "test"}, Evidence: schemas.TestEvidenceCommandOnly, Tests: []schemas.TestCaseResult{{Name: "suite", Status: "skipped"}}})
+	report := func(status schemas.VerificationStatus, tools []schemas.VerificationToolRun, findings int) schemas.VerificationReport {
+		r := schemas.VerificationReport{Status: status, Complete: status != schemas.VerificationIncomplete, Summary: "report", Tools: tools}
+		for i := 0; i < findings; i++ {
+			r.Findings = append(r.Findings, schemas.VerificationFinding{Tool: "bandit", Message: fmt.Sprintf("finding %d", i)})
+		}
+		return r
+	}
+	bandit := schemas.VerificationToolRun{Tool: "bandit", Required: true, Scope: "python", Status: schemas.VerificationPassed, Summary: "ok"}
+	gosec := schemas.VerificationToolRun{Tool: "gosec", Required: true, Scope: "go", Status: schemas.VerificationPassed, Summary: "ok"}
+	security := func(r schemas.VerificationReport) schemas.HarnessStageOutput {
+		return out("security_auditor", map[string]any{"security_auditor_output": r, VerificationReportKey: r})
+	}
+	static := func(r schemas.VerificationReport) schemas.HarnessStageOutput {
+		return out("static_analyzer", map[string]any{"static_analyzer_output": r, VerificationReportKey: r})
+	}
+	acceptance := out("acceptance_verifier", map[string]any{"acceptance_results": []schemas.TestCaseResult{{Name: "fact", Status: "passed"}, {Name: "manual", Status: "skipped"}}})
+	custom := out("lint_gate", map[string]any{VerificationReportKey: report(schemas.VerificationPassed, []schemas.VerificationToolRun{{Tool: "custom-lint", Scope: "repo", Status: schemas.VerificationPassed, Summary: "ok"}}, 0)})
+	findings := report(schemas.VerificationFindings, []schemas.VerificationToolRun{bandit}, 2)
+	findings.Tools[0].Status = schemas.VerificationFindings
+	incomplete := report(schemas.VerificationIncomplete, []schemas.VerificationToolRun{{Tool: "gosec", Required: true, Scope: "go", Status: schemas.VerificationIncomplete, Summary: "missing"}}, 0)
+	notApplicable := report(schemas.VerificationNotApplicable, nil, 0)
+
+	type want struct {
+		name    string
+		kind    schemas.VerificationCheckKind
+		outcome schemas.VerificationCheckOutcome
+		detail  string
+	}
+	cases := []struct {
+		name        string
+		records     []schemas.StageRecord
+		outputs     []schemas.HarnessStageOutput
+		wantOutcome string
+		want        []want
+	}{
+		{
+			name:        "tests and scanner verified",
+			records:     []schemas.StageRecord{completed("code_writer"), completed("unit_tests"), completed("security_auditor")},
+			outputs:     []schemas.HarnessStageOutput{out("code_writer", map[string]any{}), passedTests, security(report(schemas.VerificationPassed, []schemas.VerificationToolRun{bandit, gosec}, 0))},
+			wantOutcome: schemas.VerificationOutcomeVerified,
+			want: []want{
+				{"unit_tests", schemas.CheckKindTests, schemas.CheckPassed, "2 passed, 0 failed, per-test evidence"},
+				{"security_auditor", schemas.CheckKindSecurityScan, schemas.CheckPassed, "bandit, gosec"},
+			},
+		},
+		{
+			name:        "scanner only is verified and says no tests ran",
+			records:     []schemas.StageRecord{completed("unit_tests"), completed("security_auditor")},
+			outputs:     []schemas.HarnessStageOutput{noTests, security(report(schemas.VerificationPassed, []schemas.VerificationToolRun{bandit}, 0))},
+			wantOutcome: schemas.VerificationOutcomeVerified,
+			want: []want{
+				{"unit_tests", schemas.CheckKindTests, schemas.CheckNoTests, "no tests ran"},
+				{"security_auditor", schemas.CheckKindSecurityScan, schemas.CheckPassed, "bandit"},
+			},
+		},
+		{
+			name:        "failed tests with a passed scanner",
+			records:     []schemas.StageRecord{completed("unit_tests"), completed("security_auditor")},
+			outputs:     []schemas.HarnessStageOutput{failedTests, security(report(schemas.VerificationPassed, []schemas.VerificationToolRun{bandit}, 0))},
+			wantOutcome: schemas.VerificationOutcomeUnverified,
+			want: []want{
+				{"unit_tests", schemas.CheckKindTests, schemas.CheckFailed, "1 passed, 1 failed, per-test evidence"},
+				{"security_auditor", schemas.CheckKindSecurityScan, schemas.CheckPassed, "bandit"},
+			},
+		},
+		{
+			name:        "command passed",
+			records:     []schemas.StageRecord{completed("unit_tests")},
+			outputs:     []schemas.HarnessStageOutput{commandOnly},
+			wantOutcome: schemas.VerificationOutcomeCommandPassed,
+			want:        []want{{"unit_tests", schemas.CheckKindTests, schemas.CheckCommandPassed, "exit code 0, per-test evidence unavailable"}},
+		},
+		{
+			name:        "findings, not applicable, acceptance, custom",
+			records:     []schemas.StageRecord{completed("acceptance_verifier"), completed("security_auditor"), {Name: "static_analyzer", Status: schemas.StageSkipped, OutputSummary: Ptr("No applicable files to verify.")}, completed("lint_gate")},
+			outputs:     []schemas.HarnessStageOutput{acceptance, security(findings), static(notApplicable), custom},
+			wantOutcome: schemas.VerificationOutcomeVerified,
+			want: []want{
+				{"acceptance_verifier", schemas.CheckKindAcceptance, schemas.CheckPassed, "1 passed, 0 failed, 1 skipped"},
+				{"security_auditor", schemas.CheckKindSecurityScan, schemas.CheckFindings, "bandit; 2 findings"},
+				{"static_analyzer", schemas.CheckKindStaticAnalysis, schemas.CheckNotApplicable, "No applicable files to verify."},
+				{"lint_gate", schemas.CheckKindCustom, schemas.CheckPassed, "custom-lint"},
+			},
+		},
+		{
+			name:        "skipped stage with no output and an incomplete report",
+			records:     []schemas.StageRecord{{Name: "unit_tests", Status: schemas.StageSkipped, OutputSummary: Ptr("Stage skipped: no configured agent for unit_tests")}, {Name: "security_auditor", Status: schemas.StageIncomplete}, {Name: "code_writer", Status: schemas.StageSkipped}},
+			outputs:     []schemas.HarnessStageOutput{security(incomplete)},
+			wantOutcome: schemas.VerificationOutcomeUnverified,
+			want: []want{
+				{"unit_tests", schemas.CheckKindTests, schemas.CheckSkipped, "Stage skipped: no configured agent for unit_tests"},
+				{"security_auditor", schemas.CheckKindSecurityScan, schemas.CheckIncomplete, "did not run: gosec"},
+			},
+		},
+		{
+			name:        "failed verification stage",
+			records:     []schemas.StageRecord{{Name: "lint_gate", Status: schemas.StageFailed, OutputSummary: Ptr("lint gate crashed")}},
+			wantOutcome: schemas.VerificationOutcomeUnverified,
+			want:        []want{{"lint_gate", schemas.CheckKindCustom, schemas.CheckFailed, "lint gate crashed"}},
+		},
+		{
+			name:        "output without a stage is named by its kind",
+			outputs:     []schemas.HarnessStageOutput{{Data: map[string]any{"test_results": passedTests.Data["test_results"]}}},
+			wantOutcome: schemas.VerificationOutcomeVerified,
+			want:        []want{{"tests", schemas.CheckKindTests, schemas.CheckPassed, "2 passed, 0 failed, per-test evidence"}},
+		},
+	}
+	seen := map[schemas.VerificationCheckOutcome]bool{}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			outcome, _, checks := passVerification(plan, tc.records, tc.outputs)
+			if outcome != tc.wantOutcome {
+				t.Fatalf("outcome = %q, want %q", outcome, tc.wantOutcome)
+			}
+			if len(checks) != len(tc.want) {
+				t.Fatalf("checks = %+v, want %d checks", checks, len(tc.want))
+			}
+			for i, w := range tc.want {
+				got := checks[i]
+				if got.Name != w.name || got.Kind != w.kind || got.Outcome != w.outcome || got.Detail != w.detail {
+					t.Errorf("checks[%d] = %+v, want %+v", i, got, w)
+				}
+				seen[got.Outcome] = true
+			}
+			if err := schemas.ValidateVerificationChecks(checks, outcome == schemas.VerificationOutcomeVerified); err != nil {
+				t.Fatalf("checks break the consistency rule: %v", err)
+			}
+		})
+	}
+	for _, outcome := range []schemas.VerificationCheckOutcome{schemas.CheckPassed, schemas.CheckFailed, schemas.CheckFindings, schemas.CheckSkipped, schemas.CheckIncomplete, schemas.CheckCommandPassed, schemas.CheckNoTests, schemas.CheckNotApplicable} {
+		if !seen[outcome] {
+			t.Errorf("no case covers check outcome %q", outcome)
+		}
 	}
 }
 
@@ -4107,17 +4571,12 @@ func TestPipelineDisablesBashContextFulfillment(t *testing.T) {
 	if report.Status == schemas.VerificationPassed {
 		t.Fatal("quality check passed despite disabled bash")
 	}
-	found := false
-	for _, f := range report.Findings {
-		if f.RuleID == "PY_COMPILE" {
-			found = true
-			if !strings.Contains(f.Message, `Tool "bash" is not enabled`) && !strings.Contains(f.Message, "not enabled for this run") {
-				t.Fatalf("PY_COMPILE message = %q, want bash filter denial", f.Message)
-			}
-		}
+	// The check could not run, so it is incomplete. It is not a code finding.
+	if report.Status != schemas.VerificationIncomplete || len(report.Findings) != 0 {
+		t.Fatalf("status=%q findings=%+v, want incomplete with no findings", report.Status, report.Findings)
 	}
-	if !found {
-		t.Fatalf("expected PY_COMPILE finding from disabled bash, got status=%q summary=%q findings=%+v", report.Status, report.Summary, report.Findings)
+	if !strings.Contains(report.Summary, `Tool "bash" is not enabled`) {
+		t.Fatalf("summary = %q, want bash filter denial", report.Summary)
 	}
 }
 
@@ -4172,6 +4631,78 @@ func TestPipelineBeforeToolHookFires(t *testing.T) {
 	}
 	if !started {
 		t.Fatalf("beforeTool hook did not fire; audit=%+v", events)
+	}
+}
+
+// TestPipelineHooksRunUnderStageSandbox checks the pipeline wiring:
+// buildStageToolRunner binds the hook dispatcher to the stage engine. A user
+// hook that writes outside the workspace is denied with a loud block naming
+// the hook and runOnHost; a runOnHost user hook and a formatter hook that
+// writes inside the workspace still work.
+func TestPipelineHooksRunUnderStageSandbox(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses /bin/sh")
+	}
+	if backend := sandbox.SelectBackend(sandbox.BackendOptions{}); !backend.Available {
+		t.Skipf("host native sandbox backend unavailable: %s", backend.Message)
+	}
+	workDir, registry := newRunTestWorkspace(t)
+	workDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(workDir, "a.go")
+	if err := os.WriteFile(source, []byte("package x\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("user home unavailable: %v", err)
+	}
+	outsideDir, err := os.MkdirTemp(home, ".splice-pipeline-hook-test-")
+	if err != nil {
+		t.Skipf("home dir not writable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outsideDir) })
+	writer := func(id string, target string, runOnHost bool) hooks.Definition {
+		return hooks.Definition{ID: id, Event: hooks.EventBeforeTool, Matcher: "read_file", Command: "/bin/sh", Args: []string{"-c", `echo pwned > "$1"`, "hook", target}, Enabled: true, RunOnHost: runOnHost}
+	}
+	run := func(hook hooks.Definition) ToolResult {
+		dispatcher := hooks.NewDispatcher(hooks.DispatcherOptions{
+			Config: hooks.Config{Enabled: true, Hooks: []hooks.Definition{hook}},
+			Cwd:    t.TempDir(),
+		})
+		_, runner := buildStageToolRunner(PipelineConfigFromAgentOptions(agent.Options{Cwd: workDir, Registry: registry, Hooks: dispatcher}), workDir)
+		res, err := runner.RunTool(context.Background(), "read_file", map[string]any{"path": source})
+		if err != nil {
+			t.Fatalf("RunTool: %v", err)
+		}
+		return res
+	}
+
+	denied := filepath.Join(outsideDir, "denied.txt")
+	res := run(writer("user-notify", denied, false))
+	if res.OK || !strings.Contains(res.Output, "user-notify") || !strings.Contains(res.Output, "runOnHost") {
+		t.Fatalf("result = %+v, want a loud block naming the hook and runOnHost", res)
+	}
+	if _, err := os.Stat(denied); !os.IsNotExist(err) {
+		t.Fatalf("hook wrote outside the workspace in a pipeline run (stat err=%v)", err)
+	}
+
+	allowed := filepath.Join(outsideDir, "allowed.txt")
+	if res := run(writer("user-trusted", allowed, true)); !res.OK {
+		t.Fatalf("runOnHost hook result = %+v, want the tool to run", res)
+	}
+	if _, err := os.Stat(allowed); err != nil {
+		t.Fatalf("runOnHost hook did not write on the host: %v", err)
+	}
+
+	formatter := hooks.Definition{ID: "fmt", Event: hooks.EventAfterTool, Command: "/bin/sh", Args: []string{"-c", "echo ok > formatted.txt"}, Enabled: true}
+	if res := run(formatter); !res.OK {
+		t.Fatalf("formatter result = %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "formatted.txt")); err != nil {
+		t.Fatalf("formatter hook did not write inside the workspace: %v", err)
 	}
 }
 
@@ -4915,6 +5446,345 @@ func (e *decisionRecordCancelEvaluator) Evaluate(ctx context.Context, request ze
 	return result, err
 }
 
+// With the classifier active, a stalled repair must not end the run at the
+// rule-mode guard. The classifier decides the boundary. Its decision here is
+// continue, so the run reaches that boundary. The evaluator cancels the
+// context there, which proves the run continued past the stall.
+func TestRunStalledRepairWithClassifierContinues(t *testing.T) {
+	t.Setenv(DecisionAdvisorModeEnvVar, "")
+	t.Setenv(DecisionAdvisorModelEnvVar, "")
+	t.Setenv(TrajectoryPackEnvVar, "")
+	t.Setenv(DecisionRecordsDirEnvVar, "")
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module example\n\ngo 1.25\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "main_test.go"), []byte("package main\nimport \"testing\"\nfunc TestHello(t *testing.T) { if Hello() != \"hello\" { t.Fatal(\"wrong greeting\") } }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(workDir))
+	registry.Register(tools.NewListDirectoryTool(workDir))
+	registry.Register(tools.NewGrepTool(workDir))
+	registry.Register(tools.NewWriteFileTool(workDir))
+	registry.Register(tools.NewBashTool(workDir))
+	eval := &trajectoryEvaluator{label: "continue"}
+	var progress strings.Builder
+	options := agent.Options{SessionID: "stall-classifier", Cwd: workDir, Registry: registry, FileTracker: tools.NewFileTracker(), PermissionMode: agent.PermissionModeAuto,
+		Flags: flags.Set{flags.DecisionAdvisorEnabled: true}, DecisionEvaluator: eval,
+		DecisionAdvisorConfig: config.DecisionAdvisorConfig{Mode: "shadow", Backend: "http", QuestionPack: QuestionPackTrajActionV1, Profile: "test-model"},
+		OnReasoning:           func(s string) { progress.WriteString(s) },
+	}
+
+	result, err := Run(context.Background(), "add a Hello function and tests", runFailingProvider{}, options, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(progress.String(), repairNoProgressReason) {
+		t.Fatalf("fixture did not stall the repair loop:\n%s", progress.String())
+	}
+	// The classifier decided continue at the stalled boundary, so pass 2 starts.
+	if !strings.Contains(progress.String(), "Starting pipeline iteration 2") {
+		t.Fatalf("a stalled repair with an active classifier did not reach pass 2:\n%s", progress.String())
+	}
+	if result.Incomplete && strings.Contains(result.IncompleteReason, "no new pass started") {
+		t.Fatalf("the rule-mode guard ended a classifier-owned run: %s", result.IncompleteReason)
+	}
+}
+
+// fixtureStage is a model-free stage whose output the test scripts per call.
+type fixtureStage struct {
+	calls int
+	run   func(call int) (schemas.HarnessStageOutput, error)
+}
+
+func (*fixtureStage) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: true}
+}
+
+func (s *fixtureStage) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	s.calls++
+	return s.run(s.calls)
+}
+
+// acceptanceFixture runs tests that pass and one acceptance check that
+// always fails. The writer scripts result.txt, so a test controls whether a
+// pass changes the workspace. It returns the registry, the writer, and the
+// workspace directory.
+func acceptanceFixture(t *testing.T, writeContent func(call int) string) (stageRegistry, *fixtureStage, string) {
+	t.Helper()
+	workDir := t.TempDir()
+	writer := &fixtureStage{run: func(call int) (schemas.HarnessStageOutput, error) {
+		return schemas.HarnessStageOutput{Summary: "wrote result"}, os.WriteFile(filepath.Join(workDir, "result.txt"), []byte(writeContent(call)), 0600)
+	}}
+	tests := &fixtureStage{run: func(int) (schemas.HarnessStageOutput, error) {
+		return schemas.HarnessStageOutput{Summary: "tests passed", Data: map[string]any{"test_results": schemas.TestRunResults{
+			Command: []string{"go", "test"}, Tests: []schemas.TestCaseResult{{Name: "TestHello", Status: "passed"}},
+		}}}, nil
+	}}
+	acceptance := &fixtureStage{run: func(int) (schemas.HarnessStageOutput, error) {
+		return schemas.HarnessStageOutput{Summary: "acceptance", Data: map[string]any{"acceptance_results": []schemas.TestCaseResult{
+			{Name: "returns 42", Status: "failed", Message: "exit code 1"},
+		}}}, nil
+	}}
+	return stageRegistry{"code_writer": writer, "test_runner": tests, "acceptance_verifier": acceptance}, writer, workDir
+}
+
+func TestRunStopsWhenAcceptanceFailsUnchanged(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(int) string { return "same content" })
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance fails on an unchanged workspace",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-acceptance-stall", plan, registry,
+		runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "aborted" {
+		t.Fatalf("status = %q, want aborted", result.Status)
+	}
+	reason := DerefString(result.AbortReason)
+	if writer.calls != 2 || !strings.Contains(reason, "acceptance_no_progress") || !strings.Contains(reason, "returns 42") {
+		t.Fatalf("writer calls = %d, reason = %q; want 2 passes and the acceptance reason", writer.calls, reason)
+	}
+}
+
+// With an escalation model, the repeat limit switches the run to that model
+// once and does not stop it. The count restarts for the escalated model, so
+// the run passes the old limit again before the iteration limit ends it.
+func TestRunEscalatesOnceBeforeAcceptanceRepeatStops(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(call int) string { return fmt.Sprintf("attempt %d", call) })
+	// The writer reports its file contents. The cycle rule hashes them, so
+	// each pass has its own state and the cycle rule does not escalate first.
+	writer.run = func(call int) (schemas.HarnessStageOutput, error) {
+		content := fmt.Sprintf("attempt %d", call)
+		if err := os.WriteFile(filepath.Join(workDir, "result.txt"), []byte(content), 0600); err != nil {
+			return schemas.HarnessStageOutput{}, err
+		}
+		return schemas.HarnessStageOutput{Summary: "wrote result", Data: map[string]any{"code_writer_output": schemas.CodeWriterOutput{
+			Files: []schemas.FileChange{{Path: "result.txt", ChangeType: "modify", Content: content}},
+		}}}, nil
+	}
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance repeats while the workspace changes",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	var progress strings.Builder
+	// The rules may ask the escalated model for a step-back analysis. The
+	// varying provider answers that call.
+	cfg := PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50,
+		EscalationModelResolver: func() (agent.ModelSelection, error) {
+			return agent.ModelSelection{Provider: &varyingFailureProvider{}, ProviderName: "escalation-provider", Model: "escalated-model"}, nil
+		}})
+	cfg.OnReasoning = func(s string) { progress.WriteString(s) }
+	result, err := runIterationLoop(context.Background(), "run-acceptance-escalate", plan, registry,
+		runFakeProvider{}, cfg, workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	reason := DerefString(result.AbortReason)
+	if writer.calls <= acceptanceRepeatLimit {
+		t.Fatalf("writer calls = %d; the run stopped at the repeat limit instead of escalating; reason = %q", writer.calls, reason)
+	}
+	if strings.Contains(reason, "acceptance_no_progress") {
+		t.Fatalf("acceptance guard ended the run after escalation: %q", reason)
+	}
+	if !strings.Contains(progress.String(), "[escalation] switched to model escalated-model for iteration 4") {
+		t.Fatalf("no escalation switch at the repeat limit:\n%s", progress.String())
+	}
+	if n := strings.Count(progress.String(), "[escalation] switched"); n != 1 {
+		t.Fatalf("escalation switches = %d, want 1", n)
+	}
+}
+
+// With an escalation model, the acceptance stall switches the run to that
+// model once. The count restarts, so the run stops at the next stall.
+func TestRunEscalatesOnceBeforeAcceptanceStallStops(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(int) string { return "same content" })
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance fails on an unchanged workspace",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	var progress strings.Builder
+	cfg := PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50,
+		EscalationModelResolver: func() (agent.ModelSelection, error) {
+			return agent.ModelSelection{Provider: &varyingFailureProvider{}, ProviderName: "escalation-provider", Model: "escalated-model"}, nil
+		}})
+	cfg.OnReasoning = func(s string) { progress.WriteString(s) }
+	result, err := runIterationLoop(context.Background(), "run-acceptance-stall-escalate", plan, registry,
+		runFakeProvider{}, cfg, workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	reason := DerefString(result.AbortReason)
+	if result.Status != "aborted" || writer.calls != 4 {
+		t.Fatalf("status = %q, writer calls = %d; want aborted after pass 4; reason = %q", result.Status, writer.calls, reason)
+	}
+	if !strings.Contains(reason, "acceptance_no_progress") || !strings.Contains(reason, "iterations 3 and 4") {
+		t.Fatalf("reason = %q; want the stall reason for iterations 3 and 4", reason)
+	}
+	if !strings.Contains(progress.String(), "[escalation] switched to model escalated-model for iteration 3") {
+		t.Fatalf("no escalation switch at the first stall:\n%s", progress.String())
+	}
+	if n := strings.Count(progress.String(), "[escalation] switched"); n != 1 {
+		t.Fatalf("escalation switches = %d, want 1", n)
+	}
+}
+
+func TestRunContinuesWhenAcceptanceFailsButFilesChange(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(call int) string { return fmt.Sprintf("attempt %d", call) })
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance fails while the workspace changes",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-acceptance-changing", plan, registry,
+		runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	// The files change on every pass, so the no-change rule does not apply.
+	// The run continues past iteration 2 and stops at the repeat limit.
+	reason := DerefString(result.AbortReason)
+	if result.Status != "aborted" || writer.calls != acceptanceRepeatLimit || !strings.Contains(reason, "although the code changed") {
+		t.Fatalf("status = %q, writer calls = %d, reason = %q; want abort at iteration %d by the repeat rule", result.Status, writer.calls, reason, acceptanceRepeatLimit)
+	}
+}
+
+func TestRunStopsWhenAcceptanceRepeatsWithChanges(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(call int) string { return fmt.Sprintf("attempt %d", call) })
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance repeats while the workspace changes",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-acceptance-repeat", plan, registry,
+		runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	reason := DerefString(result.AbortReason)
+	if result.Status != "aborted" || writer.calls != acceptanceRepeatLimit {
+		t.Fatalf("status = %q, writer calls = %d; want aborted after iteration %d", result.Status, writer.calls, acceptanceRepeatLimit)
+	}
+	if !strings.Contains(reason, "although the code changed") || !strings.Contains(reason, "returns 42") {
+		t.Fatalf("reason = %q; want the repeat reason and the failing statement", reason)
+	}
+}
+
+// The failing check changes on every pass, so the signature changes and the
+// acceptance guard never counts a repeat, even while the files change.
+func TestRunAcceptanceGuardIgnoresChangingFailures(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(call int) string { return fmt.Sprintf("attempt %d", call) })
+	registry["acceptance_verifier"] = &fixtureStage{run: func(call int) (schemas.HarnessStageOutput, error) {
+		return schemas.HarnessStageOutput{Summary: "acceptance", Data: map[string]any{"acceptance_results": []schemas.TestCaseResult{
+			{Name: fmt.Sprintf("returns %d", call), Status: "failed", Message: "exit code 1"},
+		}}}, nil
+	}}
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance fails with a different check each pass",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	result, err := runIterationLoop(context.Background(), "run-acceptance-moving", plan, registry,
+		runFakeProvider{}, PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50}), workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if reason := DerefString(result.AbortReason); strings.Contains(reason, "acceptance_no_progress") {
+		t.Fatalf("guard fired although the failing checks changed: %q", reason)
+	}
+	if writer.calls <= acceptanceRepeatLimit {
+		t.Fatalf("writer calls = %d, want the loop to pass iteration %d", writer.calls, acceptanceRepeatLimit)
+	}
+}
+
+// The run log gets one message event that lists the failed checks. A pass
+// with no failed check emits no message event.
+func TestRunEmitsFailedAcceptanceChecksAsMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name, status, detail string
+	}{
+		{"failed", "failed", "acceptance\n- failed: returns 42: exit code 1"},
+		{"passed", "passed", "acceptance"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry, _, workDir := acceptanceFixture(t, func(int) string { return "same content" })
+			registry["acceptance_verifier"] = &fixtureStage{run: func(int) (schemas.HarnessStageOutput, error) {
+				return schemas.HarnessStageOutput{Summary: "acceptance", Detail: tc.detail, Data: map[string]any{"acceptance_results": []schemas.TestCaseResult{
+					{Name: "returns 42", Status: tc.status, Message: "exit code 1"},
+				}}}, nil
+			}}
+			plan := schemas.ExecutionPlan{
+				Tier:          schemas.TierLight,
+				TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+				RequestIntent: "acceptance messages",
+				Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+			}
+			var events []agent.StageEvent
+			cfg := PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50, OnStageEvent: func(e agent.StageEvent) { events = append(events, e) }})
+			if _, err := runIterationLoop(context.Background(), "run-acceptance-message-"+tc.name, plan, registry,
+				runFakeProvider{}, cfg, workDir, nil, nil, nil, nil, nil, nil); err != nil {
+				t.Fatalf("runIterationLoop: %v", err)
+			}
+			var messages []string
+			for _, e := range events {
+				if e.Name == "acceptance_verifier" && e.Status == "message" {
+					messages = append(messages, e.Detail)
+				}
+			}
+			if tc.status == "failed" {
+				if len(messages) == 0 {
+					t.Fatal("no message event for a failed acceptance check")
+				}
+				for _, m := range messages {
+					if m != "- failed: returns 42: exit code 1" {
+						t.Fatalf("message = %q, want the failed-check line", m)
+					}
+				}
+				return
+			}
+			if len(messages) != 0 {
+				t.Fatalf("message events for passing checks: %q", messages)
+			}
+		})
+	}
+}
+
+func TestAcceptanceStallGuardOffWithClassifier(t *testing.T) {
+	registry, _, workDir := acceptanceFixture(t, func(int) string { return "same content" })
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance fails under an active classifier",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	eval := &trajectoryEvaluator{label: "continue"}
+	cfg := PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50})
+	cfg.Advisor = classifierAdvisor(t, eval)
+	result, err := runIterationLoop(context.Background(), "run-acceptance-classifier", plan, registry,
+		runFakeProvider{}, cfg, workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if eval.calls == 0 {
+		t.Fatal("classifier was not consulted, so the fixture does not test the classifier-owned path")
+	}
+	if reason := DerefString(result.AbortReason); strings.Contains(reason, "acceptance_no_progress") {
+		t.Fatalf("rule-mode guard ended a classifier-owned run: %q", reason)
+	}
+}
+
 func TestRunDecisionRecordsSink(t *testing.T) {
 	for _, kind := range []string{"completed", "failed", "aborted", "cancelled", "unset", "advisor absent", "write error"} {
 		t.Run(kind, func(t *testing.T) {
@@ -4963,6 +5833,11 @@ func TestRunDecisionRecordsSink(t *testing.T) {
 				options.Flags[flags.TrajectoryClassifierEnabled] = false
 			}
 			var provider agent.Provider = &decisionRecordRunProvider{broken: kind == "aborted"}
+			if kind == "advisor absent" {
+				// Each failing repair must bring new evidence, or the rule-mode
+				// backstop ends the run before the fix lands.
+				provider = &varyingFailureProvider{failFirst: 2}
+			}
 			if kind == "failed" {
 				provider = badOutputProvider{}
 			}
@@ -5302,5 +6177,105 @@ func TestRunIterationLoopRecordsStageErrorKindInFailureHistory(t *testing.T) {
 	}
 	if got := policy.failureHistory[0].Kind; got != schemas.NodeFailureStageError {
 		t.Fatalf("FailureHistory[0].Kind = %q, want stage_error (history %+v)", got, policy.failureHistory)
+	}
+}
+
+// TestRunIgnoresProposalBasesFromAnotherRun pins per-run scope: a snapshot
+// left in the process registry by an earlier run must not judge this run's
+// create of the same path.
+func TestRunIgnoresProposalBasesFromAnotherRun(t *testing.T) {
+	stale := stages.NewProposalBaseRegistry()
+	stale.RecordFromBundle(&schemas.ContextBundle{Items: []schemas.ContextItem{{
+		Query:   schemas.ContextQuery{QueryType: schemas.ContextReadFile},
+		Summary: "main.go",
+		Payload: map[string]any{"path": "main.go", "version": "old", "text": "package old\n", "raw": "package old\n", "start": 1, "end": 2},
+	}}})
+	reset := stages.SetProposalBases(stale)
+	defer reset()
+
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module example\n\ngo 1.22\n"), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(workDir))
+	registry.Register(tools.NewWriteFileTool(workDir))
+	result, err := Run(context.Background(), "add a Hello function and tests", runFakeProvider{}, agent.Options{
+		Cwd:            workDir,
+		Registry:       registry,
+		PermissionMode: agent.PermissionModeAuto,
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(result.IncompleteReason, "changed or was read incompletely") {
+		t.Fatalf("a stale base from another run judged this run's write: %s", result.IncompleteReason)
+	}
+}
+
+// staleBaseBundle is a delivered view of path that an earlier scope left behind.
+func staleBaseBundle(path string) *schemas.ContextBundle {
+	return &schemas.ContextBundle{Items: []schemas.ContextItem{{
+		Query:   schemas.ContextQuery{QueryType: schemas.ContextReadFile},
+		Summary: path,
+		Payload: map[string]any{"path": path, "version": "old", "text": "old\n", "raw": "old\n", "start": 1, "end": 2},
+	}}}
+}
+
+// TestBracketRunScopesProposalBasesPerRun pins the per-run scope on its own:
+// a registry left before the run is not visible inside it.
+func TestBracketRunScopesProposalBasesPerRun(t *testing.T) {
+	stale := stages.NewProposalBaseRegistry()
+	stale.RecordFromBundle(staleBaseBundle("x.py"))
+	defer stages.SetProposalBases(stale)()
+	var seen []string
+	if _, err := bracketRun(agent.Options{}, func() (agent.Result, error) {
+		seen = stages.ProbeBasePaths()
+		return agent.Result{}, nil
+	}); err != nil {
+		t.Fatalf("bracketRun: %v", err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("a run saw bases from before it started: %v", seen)
+	}
+}
+
+// scopeProbeRunner records the base paths visible when its stage runs.
+type scopeProbeRunner struct {
+	seen *[]string
+	ran  *bool
+}
+
+func (scopeProbeRunner) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: true}
+}
+
+func (p scopeProbeRunner) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	*p.seen = stages.ProbeBasePaths()
+	*p.ran = true
+	return repairTestResults("passed"), nil
+}
+
+// TestRunPassScopesProposalBasesPerPass pins the per-pass scope on its own: a
+// view left before the pass is not visible inside it.
+func TestRunPassScopesProposalBasesPerPass(t *testing.T) {
+	stale := stages.NewProposalBaseRegistry()
+	stale.RecordFromBundle(staleBaseBundle("x.py"))
+	defer stages.SetProposalBases(stale)()
+	workDir := t.TempDir()
+	plan := repairTestPlan()
+	var seen []string
+	ran := false
+	tr := newRunTraceAccumulator(nil, "scope-pass", "session", workDir, plan, "active", nil)
+	runPass(context.Background(), "scope-pass", 1, plan,
+		stageRegistry{"code_writer": scopeProbeRunner{seen: &seen, ran: &ran}, "test_runner": &memoryRepairTestRunner{}},
+		&memoryScriptedProvider{}, PipelineConfigFromAgentOptions(agent.Options{}), workDir,
+		ToolRunnerFunc(func(context.Context, string, map[string]any) (ToolResult, error) { return ToolResult{OK: true}, nil }),
+		time.Time{}, nil, &stubStore{}, tr, NewStageExecutionBudget(0))
+	if !ran {
+		t.Fatal("the probe stage never ran")
+	}
+	if len(seen) != 0 {
+		t.Fatalf("a pass saw views from before it started: %v", seen)
 	}
 }

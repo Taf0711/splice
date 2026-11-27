@@ -2,6 +2,7 @@ package splice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -110,7 +111,22 @@ func fulfillReadFile(ctx context.Context, query schemas.ContextQuery, runner Too
 	// time. A seam failure degrades gracefully: the item is still
 	// delivered without a version, and no base is recorded for it.
 	raw, rawErr := ToolRunnerSourceReader{Inner: runner}.ReadSource(ctx, *query.Path)
-	res, err := runner.RunTool(ctx, readToolName, map[string]any{"path": *query.Path})
+	// E04: a ranged query reads only its lines. The payload describes the
+	// range actually delivered, clamped to the file. The version stays the
+	// whole-file digest, so the base registry still pins the file itself.
+	total := rawLineCount(raw.Raw)
+	start, end := 1, total
+	args := map[string]any{"path": *query.Path}
+	if query.HasRange() {
+		if rawErr == nil {
+			start, end = clampLineRange(*query.StartLine, *query.EndLine, total)
+		} else {
+			start, end = *query.StartLine, *query.EndLine
+		}
+		args["start_line"] = start
+		args["end_line"] = end
+	}
+	res, err := runner.RunTool(ctx, readToolName, args)
 	if err != nil {
 		return schemas.ContextItem{}, err
 	}
@@ -122,8 +138,8 @@ func fulfillReadFile(ctx context.Context, query schemas.ContextQuery, runner Too
 		"text":    text,
 		"path":    *query.Path,
 		"version": raw.SHA256,
-		"start":   1,
-		"end":     rawLineCount(raw.Raw),
+		"start":   start,
+		"end":     end,
 		// Host-side only: the prompt composer serializes only "text";
 		// "raw" feeds the proposal base registry's content digest and the
 		// numbered-view hydration path. Never model-visible.
@@ -135,6 +151,11 @@ func fulfillReadFile(ctx context.Context, query schemas.ContextQuery, runner Too
 		delete(payload, "version")
 		delete(payload, "start")
 		delete(payload, "end")
+		// A redacted file cannot be edited exactly. The proposal base
+		// registry records the path so a later edit says why it is refused.
+		if errors.Is(rawErr, errSourceRedacted) {
+			payload["redacted_source"] = true
+		}
 	}
 	_ = truncated
 	return schemas.ContextItem{
@@ -143,6 +164,18 @@ func fulfillReadFile(ctx context.Context, query schemas.ContextQuery, runner Too
 		Payload:   payload,
 		Truncated: truncated || res.Truncated,
 	}, nil
+}
+
+// clampLineRange bounds a 1-based inclusive line range to a file of total
+// lines. The start is at least 1 and at most the last line. The end is at
+// least the start and at most the last line.
+func clampLineRange(start, end, total int) (int, int) {
+	if total < 1 {
+		return start, end
+	}
+	start = min(max(start, 1), total)
+	end = min(max(end, start), total)
+	return start, end
 }
 
 // rawLineCount counts lines in raw bytes (1-based inclusive end line for

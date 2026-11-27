@@ -31,7 +31,8 @@ func ClassifyComplexity(input schemas.ComplexityClassifierInput) schemas.Complex
 	normalized := strings.ToLower(request)
 	domains := detectRiskDomains(normalized)
 
-	if utf8.RuneCountInString(request) < 120 && containsAny(normalized, trivialKeywords) {
+	// A trivial keyword must not hide auth or security risk. Under-tiering skips verification.
+	if utf8.RuneCountInString(request) < 120 && containsAny(normalized, trivialKeywords) && !hasAuthOrSecurityRisk(domains) {
 		return schemas.ComplexityClassifierOutput{
 			Tier:                schemas.TierTrivial,
 			Rationale:           "Small wording or mechanical change with low implementation risk.",
@@ -81,6 +82,10 @@ func detectRiskDomains(normalized string) []schemas.RiskDomain {
 	addDomain(&domains, normalized, schemas.RiskTests, "test", "pytest", "coverage", "fixture")
 	addDomain(&domains, normalized, schemas.RiskUI, "ui", "tui", "terminal", "screen", "button")
 	return domains
+}
+
+func hasAuthOrSecurityRisk(domains []schemas.RiskDomain) bool {
+	return slices.Contains(domains, schemas.RiskAuth) || slices.Contains(domains, schemas.RiskSecurity)
 }
 
 func addDomain(domains *[]schemas.RiskDomain, normalized string, domain schemas.RiskDomain, keywords ...string) {

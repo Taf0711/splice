@@ -197,3 +197,122 @@ func TestSandboxGoCachePathSeparatesRepositoriesAndSupportsNonGit(t *testing.T) 
 		t.Fatalf("non-git workspace should still resolve cache path: %v", err)
 	}
 }
+
+// TestWithSandboxGoCacheKeepsOnlyWritablePresetGOCACHE checks which caller
+// GOCACHE values survive. A preset value stays only when the sandboxed process
+// can write to it. Any other value is replaced by the sandbox cache directory.
+func TestWithSandboxGoCacheKeepsOnlyWritablePresetGOCACHE(t *testing.T) {
+	t.Setenv("GOCACHE", "")
+	root := t.TempDir()
+	cacheDir, err := sandboxGoCachePath(root)
+	if err != nil {
+		t.Fatalf("sandboxGoCachePath: %v", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	outside := filepath.Join(home, "splice-gocache-outside-write-roots")
+	inWorkspace := filepath.Join(root, "custom-cache")
+	inTemp := filepath.Join(os.TempDir(), "splice-gocache-in-temp")
+
+	tests := []struct {
+		name      string
+		env       []string
+		wantCache bool   // true: expect the sandbox cache directory
+		want      string // used when wantCache is false
+	}{
+		{name: "unset", env: []string{"PATH=/bin"}, wantCache: true},
+		{name: "outside write roots", env: []string{"GOCACHE=" + outside}, wantCache: true},
+		{name: "relative path", env: []string{"GOCACHE=relative-cache"}, wantCache: true},
+		{name: "inside workspace", env: []string{"GOCACHE=" + inWorkspace}, want: inWorkspace},
+		{name: "inside temp write root", env: []string{"GOCACHE=" + inTemp}, want: inTemp},
+		{name: "off", env: []string{"GOCACHE=off"}, want: "off"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			profile := PermissionProfileFromPolicy(root, DefaultPolicy(), nil)
+			env, err := withSandboxGoCache(tt.env, DefaultPolicy(), BackendLinuxBwrap, root, profile)
+			if err != nil {
+				t.Fatalf("withSandboxGoCache: %v", err)
+			}
+			got := envListValue(env, "GOCACHE", "")
+			want := tt.want
+			if tt.wantCache {
+				want = cacheDir
+			}
+			if got != want {
+				t.Fatalf("GOCACHE = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestWithSandboxGoCacheRejectsUnwritablePresetGOCACHE covers preset values
+// that look writable but are not: a symlink followed by "..", protected
+// metadata names, DenyWrite entries, and a scope extra root that the profile
+// grants. A kept value must be writable under the profile the command runs with.
+func TestWithSandboxGoCacheRejectsUnwritablePresetGOCACHE(t *testing.T) {
+	t.Setenv("GOCACHE", "")
+	root := t.TempDir()
+	cacheDir, err := sandboxGoCachePath(root)
+	if err != nil {
+		t.Fatalf("sandboxGoCachePath: %v", err)
+	}
+	// TempRoot turns off the system temp roots, so the outside dir is not writable.
+	noTemp := DefaultPolicy()
+	noTemp.TempRoot = t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// Built as a raw string: filepath.Join would clean the ".." away first.
+	dotdot := link + string(filepath.Separator) + ".." + string(filepath.Separator) + "x-cache"
+
+	denyPolicy := noTemp
+	denyPolicy.DenyWrite = []string{filepath.Join(root, "secret")}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	// Outside the temp roots, so only the scope can make it writable.
+	scopeDir, err := os.MkdirTemp(home, "splice-gocache-scope-")
+	if err != nil {
+		t.Skipf("home directory not writable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(scopeDir) })
+	scope, err := NewScope(root, []string{scopeDir})
+	if err != nil {
+		t.Fatalf("NewScope: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		profile  PermissionProfile
+		value    string
+		wantKept bool
+	}{
+		{"symlink then dot-dot", PermissionProfileFromPolicy(root, noTemp, nil), dotdot, false},
+		{"protected metadata name", PermissionProfileFromPolicy(root, noTemp, nil), filepath.Join(root, ".splice", "gocache"), false},
+		{"DenyWrite entry", PermissionProfileFromPolicy(root, denyPolicy, nil), filepath.Join(root, "secret", "cache"), false},
+		{"scope extra root", PermissionProfileFromPolicy(root, DefaultPolicy(), scope), filepath.Join(scopeDir, "cache"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env, err := withSandboxGoCache([]string{"GOCACHE=" + tt.value}, DefaultPolicy(), BackendLinuxBwrap, root, tt.profile)
+			if err != nil {
+				t.Fatalf("withSandboxGoCache: %v", err)
+			}
+			got := envListValue(env, "GOCACHE", "")
+			want := cacheDir
+			if tt.wantKept {
+				want = tt.value
+			}
+			if got != want {
+				t.Fatalf("GOCACHE = %q, want %q", got, want)
+			}
+		})
+	}
+}

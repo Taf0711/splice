@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -607,4 +608,19 @@ func TestLinuxHelperPlanPreservesRealExtraRootCwd(t *testing.T) {
 		t.Fatalf("BuildLinuxSandboxBwrapArgs: %v", err)
 	}
 	assertArgsContainSequence(t, bwrapArgs, "--chdir", resolvedExtra)
+}
+
+func TestDirectCommandPlanKeepsExplicitEnv(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-direct-plan-fake")
+	explicit := []string{"PATH=/usr/bin", "OPENAI_API_KEY=explicit-value"}
+	plan := directCommandPlan(CommandSpec{Name: "true", Env: explicit}, Backend{Name: BackendUnavailable}, Policy{}, "")
+	if !reflect.DeepEqual(plan.Env, explicit) {
+		t.Fatalf("explicit Env changed: got %q want %q", plan.Env, explicit)
+	}
+	scrubbed := directCommandPlan(CommandSpec{Name: "true"}, Backend{Name: BackendUnavailable}, Policy{}, "")
+	for _, kv := range scrubbed.Env {
+		if strings.HasPrefix(kv, "OPENAI_API_KEY=") {
+			t.Fatalf("nil Env kept provider key %q", kv)
+		}
+	}
 }

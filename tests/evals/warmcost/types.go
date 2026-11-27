@@ -40,6 +40,10 @@ const (
 	ArmColdWide Arm = "cold-wide"
 	// ArmLoop is the cold control using the plain agent tool loop.
 	ArmLoop Arm = "loop"
+	// ArmDesign is the cold control that runs a headless design-then-implement
+	// pass (exec --design). The design stages and the implementation stages
+	// each use their own route from stage-models.json.
+	ArmDesign Arm = "design"
 )
 
 // DefaultArms is the arm order the report uses.
@@ -81,7 +85,7 @@ func (a Arm) Env() []string {
 		return []string{flagsClassifierOff, "SPLICE_SCOPE_MODE=off", "SPLICE_EVIDENCE_SUBSTITUTION=off", "SPLICE_MEMORY_PREFETCH=off"}
 	case ArmColdWide:
 		return append(ArmCold.Env(), "SPLICE_EXPANSION_ROUNDS=8")
-	case ArmLoop:
+	case ArmLoop, ArmDesign:
 		return ArmCold.Env()
 	case ArmWarmJev:
 		// The M5 manifest's preregistered values. The manifest is the
@@ -120,7 +124,7 @@ func JevEnv(pUseful, capUSD string) []string {
 // MemoryMode returns the --memory value for one arm. Cold disables the
 // sidecar; every other arm enables it.
 func (a Arm) MemoryMode() string {
-	if a == ArmCold || a == ArmColdWide || a == ArmLoop {
+	if a == ArmCold || a == ArmColdWide || a == ArmLoop || a == ArmDesign {
 		return "off"
 	}
 	return "on"
@@ -131,7 +135,7 @@ func (a Arm) Base() Arm {
 	if a == ArmWarmJev {
 		return ArmWarm
 	}
-	if a == ArmColdWide || a == ArmLoop {
+	if a == ArmColdWide || a == ArmLoop || a == ArmDesign {
 		return ArmCold
 	}
 	return a
@@ -140,7 +144,7 @@ func (a Arm) Base() Arm {
 // Valid reports whether the arm is one of the known arms.
 func (a Arm) Valid() bool {
 	switch a {
-	case ArmCold, ArmWarm, ArmRetrievalOnly, ArmWarmJev, ArmColdWide, ArmLoop:
+	case ArmCold, ArmWarm, ArmRetrievalOnly, ArmWarmJev, ArmColdWide, ArmLoop, ArmDesign:
 		return true
 	}
 	return false
@@ -323,20 +327,24 @@ type Attempt struct {
 	RunID string `json:"run_id,omitempty"`
 	// Binary is the path of the binary under test. It is recorded so a reader
 	// can tie a run to the artifact that produced it, not only to a revision.
-	Binary          string          `json:"binary"`
-	BinaryRevision  string          `json:"binary_revision"`
-	SidecarRevision string          `json:"sidecar_revision"`
-	FixtureDigest   string          `json:"fixture_digest"`
-	ModelID         string          `json:"model_id"`
-	ModelSettings   ModelSettings   `json:"model_settings"`
-	TreatmentEnv    []string        `json:"treatment_env"`
-	SessionID       string          `json:"session_id"`
-	RunStatus       string          `json:"run_status"`
-	CostCoverage    string          `json:"cost_coverage"`
-	VerifierResult  bool            `json:"verifier_result"`
-	VerifierOutput  string          `json:"verifier_output,omitempty"`
-	Requests        []RequestRecord `json:"requests"`
-	Totals          Totals          `json:"totals"`
+	Binary          string        `json:"binary"`
+	BinaryRevision  string        `json:"binary_revision"`
+	SidecarRevision string        `json:"sidecar_revision"`
+	FixtureDigest   string        `json:"fixture_digest"`
+	ModelID         string        `json:"model_id"`
+	ModelSettings   ModelSettings `json:"model_settings"`
+	TrustProject    bool          `json:"trust_project"`
+	TreatmentEnv    []string      `json:"treatment_env"`
+	SessionID       string        `json:"session_id"`
+	RunStatus       string        `json:"run_status"`
+	// CritiqueUnresolved is true for a design run whose plan critic still
+	// required a fix after the one revision. The plan ran anyway.
+	CritiqueUnresolved bool            `json:"critique_unresolved"`
+	CostCoverage       string          `json:"cost_coverage"`
+	VerifierResult     bool            `json:"verifier_result"`
+	VerifierOutput     string          `json:"verifier_output,omitempty"`
+	Requests           []RequestRecord `json:"requests"`
+	Totals             Totals          `json:"totals"`
 	// CacheTelemetryReported is true when the binary emitted at least one
 	// telemetry value for this attempt. False means the telemetry fields are
 	// unknown, not zero.
@@ -363,6 +371,10 @@ type Attempt struct {
 	// the model (a network failure). Such an attempt measures the network,
 	// not the arm, so the runner retries its sequence.
 	UpstreamUnreachable bool `json:"upstream_unreachable,omitempty"`
+	// RateLimited marks a run that the provider's usage limit stopped. Such
+	// an attempt measures the provider state, not the arm, so the runner
+	// retries its sequence on a longer schedule and never records it.
+	RateLimited bool `json:"rate_limited,omitempty"`
 	// MemoryUnavailable marks a memory-arm run whose sidecar could not be
 	// reached: splice ran it without memory, so it does not measure the arm.
 	MemoryUnavailable bool `json:"memory_unavailable,omitempty"`

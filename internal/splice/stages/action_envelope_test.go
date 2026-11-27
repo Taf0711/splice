@@ -4,8 +4,11 @@ package stages
 
 import (
 	"encoding/json"
+	"fmt"
+	"reflect"
 	"testing"
 
+	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/zeroruntime"
 )
 
@@ -118,6 +121,85 @@ func TestActionContextRequestBoundsAndQueryShapes(t *testing.T) {
 	}})
 	if _, err := DecodeStageAction("submit_code", shell); err == nil {
 		t.Fatal("shell-shaped queries must be rejected (no shell commands)")
+	}
+}
+
+// clampFixture returns a read_file request whose per-query MaxChars are maxChars.
+func clampFixture(maxChars ...int) schemas.ContextRequest {
+	req := schemas.ContextRequest{Reason: "needs source"}
+	for i, n := range maxChars {
+		req.Queries = append(req.Queries, schemas.ContextQuery{
+			QueryType:  schemas.ContextReadFile,
+			Path:       strPtr(fmt.Sprintf("internal/pkg/file%d.go", i)),
+			MaxResults: 10,
+			MaxChars:   n,
+		})
+	}
+	return req
+}
+
+// TestClampActionContextRequestFitsBound pins that an oversized request is
+// scaled down to the bound and then passes the action validator.
+func TestClampActionContextRequestFitsBound(t *testing.T) {
+	req := clampFixture(18000, 18000, 18000, 18000) // sums to 72000; each query within the 20000 per-query bound
+	got := clampActionContextRequest(req)
+	total := 0
+	for _, q := range got.Queries {
+		total += q.MaxChars
+	}
+	if total > maxActionContextBytes {
+		t.Fatalf("clamped sum = %d, want <= %d", total, maxActionContextBytes)
+	}
+	if err := ValidateActionContextRequest(got); err != nil {
+		t.Fatalf("clamped request rejected: %v", err)
+	}
+}
+
+// TestClampActionContextRequestUnderBoundUnchanged pins that a request within
+// the bound is returned as-is.
+func TestClampActionContextRequestUnderBoundUnchanged(t *testing.T) {
+	req := clampFixture(20000, 20000, 8000) // sums to 48000, exactly the bound
+	if got := clampActionContextRequest(req); !reflect.DeepEqual(got, req) {
+		t.Fatalf("request under bound changed: %+v", got)
+	}
+}
+
+// TestClampActionContextRequestKeepsProportions pins that the largest query
+// stays the largest after scaling.
+func TestClampActionContextRequestKeepsProportions(t *testing.T) {
+	got := clampActionContextRequest(clampFixture(20000, 15000, 10000, 9000)) // sums to 54000
+	for i := 1; i < len(got.Queries); i++ {
+		if got.Queries[i-1].MaxChars <= got.Queries[i].MaxChars {
+			t.Fatalf("proportions lost at %d: %+v", i, got.Queries)
+		}
+	}
+}
+
+// TestDecodeStageActionClampsOversizedContextRequest pins that the decode path
+// uses the clamped request, so a model that asks for 54000 chars is not
+// rejected.
+func TestDecodeStageActionClampsOversizedContextRequest(t *testing.T) {
+	payload := dEnvelope(t, map[string]any{"request_context": map[string]any{
+		"reason": "r",
+		"queries": []map[string]any{
+			{"query_type": "read_file", "path": "a.go", "max_results": 1, "max_chars": 18000},
+			{"query_type": "read_file", "path": "b.go", "max_results": 1, "max_chars": 18000},
+			{"query_type": "read_file", "path": "c.go", "max_results": 1, "max_chars": 18000},
+		},
+	}})
+	action, err := DecodeStageAction("submit_code", payload)
+	if err != nil {
+		t.Fatalf("oversized request must be clamped, got error: %v", err)
+	}
+	if action.Request == nil {
+		t.Fatal("decoded action carries no request")
+	}
+	total := 0
+	for _, q := range action.Request.Queries {
+		total += q.MaxChars
+	}
+	if total > maxActionContextBytes {
+		t.Fatalf("decoded request sums to %d, want <= %d", total, maxActionContextBytes)
 	}
 }
 

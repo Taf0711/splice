@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -119,6 +120,7 @@ func (c tsTypeCheck) Run(ctx context.Context, req VerificationCheckRequest) (Ver
 		}
 		defer plan.Cleanup()
 		combined, rerr := cmd.CombinedOutput()
+		procrun.ReportRun(runCtx, cmd, rerr)
 		out = combined
 		if rerr != nil {
 			if errors.Is(runCtx.Err(), context.DeadlineExceeded) {

@@ -183,3 +183,125 @@ func TestJSONToolCallDeltaEmitsOnlyNewFragments(t *testing.T) {
 		t.Fatalf("concatenated deltas = %q, want full arguments %q", got, want)
 	}
 }
+
+// TestToolEventsStampRunningStage pins the stage tag on tool events. A tool
+// call inside a running stage carries the stage name and iteration. A call
+// after the stage ended, or with no stage, carries neither. A message event
+// is a note inside the stage, so it does not end the stage.
+func TestToolEventsStampRunningStage(t *testing.T) {
+	// The orchestrator emits the first pass as Iteration 0.
+	running := agent.StageEvent{Name: "code_writer", Iteration: 0, Status: "running"}
+	cases := []struct {
+		name      string
+		stages    []agent.StageEvent
+		wantStage bool
+	}{
+		{name: "inside running stage", stages: []agent.StageEvent{running}, wantStage: true},
+		{
+			name:      "after stage completed",
+			stages:    []agent.StageEvent{running, {Name: "code_writer", Iteration: 0, Status: "completed"}},
+			wantStage: false,
+		},
+		{
+			name:      "message keeps stage open",
+			stages:    []agent.StageEvent{running, {Name: "code_writer", Iteration: 0, Status: "message"}},
+			wantStage: true,
+		},
+		{name: "no stage", stages: nil, wantStage: false},
+	}
+	formats := []struct {
+		name   string
+		format execOutputFormat
+	}{
+		{name: "stream-json", format: execOutputStreamJSON},
+		{name: "json", format: execOutputJSON},
+	}
+	for _, f := range formats {
+		for _, tc := range cases {
+			t.Run(f.name+"/"+tc.name, func(t *testing.T) {
+				var stdout bytes.Buffer
+				writer := execEventWriter{
+					stdout:       &stdout,
+					format:       f.format,
+					runID:        "run_test",
+					streamedText: &strings.Builder{},
+				}
+				for _, event := range tc.stages {
+					writer.stage(event)
+				}
+				writer.toolCall(agent.ToolCall{ID: "call_1", Name: "write_file", Arguments: `{}`}, nil)
+				writer.toolResult(agent.ToolResult{ToolCallID: "call_1", Name: "write_file"})
+				if writer.err != nil {
+					t.Fatalf("writer: %v", writer.err)
+				}
+
+				var toolCall, toolResult map[string]any
+				for _, event := range decodeJSONLines(t, stdout.String()) {
+					switch event["type"] {
+					case "tool_call":
+						toolCall = event
+					case "tool_result":
+						toolResult = event
+					}
+				}
+				if toolCall == nil || toolResult == nil {
+					t.Fatalf("missing tool_call or tool_result in %q", stdout.String())
+				}
+				for _, event := range []map[string]any{toolCall, toolResult} {
+					stage, hasStage := event["stage"]
+					iteration, hasIteration := event["iteration"]
+					if !tc.wantStage {
+						if hasStage || hasIteration {
+							t.Fatalf("%v event carries stage with no running stage: %#v", event["type"], event)
+						}
+						continue
+					}
+					if !hasStage || stage != "code_writer" {
+						t.Fatalf("%v stage = %#v, want code_writer", event["type"], stage)
+					}
+					// Stamped values are 1-based, like the usage events.
+					if !hasIteration || iteration != float64(1) {
+						t.Fatalf("%v iteration = %#v, want 1 (pass number of raw Iteration 0)", event["type"], iteration)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestToolCallPassNumberMatchesUsagePass pins one pass numbering across the
+// stream. The orchestrator emits stage events from 0. The runtime loop counts
+// usage passes from 1. A tool_call stamped inside a pass must carry the same
+// number as the usage event of that pass.
+func TestToolCallPassNumberMatchesUsagePass(t *testing.T) {
+	for _, raw := range []int{0, 1} {
+		var stdout bytes.Buffer
+		writer := execEventWriter{
+			stdout:       &stdout,
+			format:       execOutputStreamJSON,
+			runID:        "run_test",
+			streamedText: &strings.Builder{},
+		}
+		writer.stage(agent.StageEvent{Name: "code_writer", Iteration: raw, Status: "running"})
+		writer.toolCall(agent.ToolCall{ID: "call_1", Name: "write_file", Arguments: `{}`}, nil)
+		writer.stage(agent.StageEvent{Name: "code_writer", Iteration: raw, Status: "completed"})
+		if writer.err != nil {
+			t.Fatalf("writer: %v", writer.err)
+		}
+
+		// Usage pass for this stage pass, as the runtime loop counts it.
+		usagePass := raw + 1
+		var toolCall map[string]any
+		for _, event := range decodeJSONLines(t, stdout.String()) {
+			if event["type"] == "tool_call" {
+				toolCall = event
+			}
+		}
+		if toolCall == nil {
+			t.Fatalf("raw pass %d: no tool_call in %q", raw, stdout.String())
+		}
+		if toolCall["iteration"] != float64(usagePass) || toolCall["stage"] != "code_writer" {
+			t.Fatalf("raw pass %d: tool_call stage/iteration = %v/%v, want code_writer/%d", raw, toolCall["stage"], toolCall["iteration"], usagePass)
+		}
+	}
+}

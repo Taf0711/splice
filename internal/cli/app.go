@@ -484,6 +484,8 @@ func runWithDeps(args []string, stdout io.Writer, stderr io.Writer, deps appDeps
 		return runContext(args[1:], stdout, stderr, deps)
 	case "repo-map", "repomap":
 		return runRepoMap(args[1:], stdout, stderr, deps)
+	case "gc":
+		return runGC(args[1:], stdout, stderr)
 	case "search", "find":
 		return runSearch(args[1:], stdout, stderr, deps)
 	case "sessions", "session":
@@ -1024,8 +1026,9 @@ func runInteractiveTUIWithSetup(stdout io.Writer, stderr io.Writer, deps appDeps
 			PermissionMode:             permissionMode,
 			Autonomy:                   "low",
 			Sandbox:                    sandboxEngine,
+			AcceptNestedSandbox:        resolved.Sandbox.AcceptNestedSandbox,
 			FileTracker:                tools.NewFileTracker(),
-			Hooks:                      newHookDispatcherWithExtra(workspaceRoot, !trusted, pluginActivation.hooks),
+			Hooks:                      newHookDispatcherWithExtra(workspaceRoot, !trusted, pluginActivation.hooks, stderr),
 			DeferThreshold:             resolved.Tools.DeferThreshold,
 			CompactionReserveTokens:    resolved.Compaction.ReserveTokens,
 			CompactionKeepRecentTokens: resolved.Compaction.KeepRecentTokens,
@@ -1406,6 +1409,7 @@ Commands:
   doctor     Run backend health checks for config and provider setup
   context    Report workspace context budget usage
   repo-map   Build a deterministic repository map for agent context
+  gc         Remove stale temp Go caches and run directories
   search     Search persisted local Splice session events
   find       Alias for search
   sessions   Inspect local Splice session lineage
@@ -1705,6 +1709,7 @@ Flags:
       --spec-reasoning-effort <effort>
                                     Override draft reasoning effort when --use-spec is set
       --plan <path>                  Execute a design plan JSON file
+      --design <request>             Design the request, critique the plan, then execute it
       --pipeline <name|path>         Run a pipeline topology from the user library or a file
       --loop                         Run the plain coding-agent tool loop instead of the fixed pipeline
       --max-turns <number>           Override the maximum agent loop turns
@@ -1714,6 +1719,7 @@ Flags:
       --disabled-tools <tools>       Hide these comma or space separated tools
       --list-tools                   List model-visible tools and exit
       --inherit-worktree-trust       Let a worktree inherit trust from its trusted source repo (spike; off by default)
+      --accept-nested-sandbox        Run stage commands under an outer sandbox when Splice already runs inside one (this run only)
       --profile <profile>            Accept legacy model profile selection
   -r, --reasoning-effort <effort>    Accept legacy reasoning effort selection
   -C, --cwd <path>                   Set the workspace directory

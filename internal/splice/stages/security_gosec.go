@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -77,6 +78,7 @@ func (c gosecCheck) Run(ctx context.Context, req VerificationCheckRequest) (Veri
 		}
 		defer plan.Cleanup()
 		out, err = cmd.CombinedOutput()
+		procrun.ReportRun(ctx, cmd, err)
 		if err != nil && !strings.Contains(string(out), `"Issues"`) {
 			// gosec not installed: exec.ErrNotFound produces no output, so check
 			// the error message too (not just the output) to degrade to incomplete.

@@ -34,6 +34,14 @@ type OutcomeRecord struct {
 	// Verified mirrors PipelineResult.Verified. A completed run that did not
 	// verify is recorded with Verified false.
 	Verified bool `json:"verified"`
+	// VerificationOutcome mirrors PipelineResult.VerificationOutcome. Empty on
+	// traces written before the field existed.
+	VerificationOutcome string `json:"verification_outcome,omitempty"`
+	// VerificationChecks mirrors PipelineResult.VerificationChecks. Empty on
+	// traces written before the field existed.
+	VerificationChecks []VerificationCheck `json:"verification_checks,omitempty"`
+	// NestedSandboxAccepted mirrors PipelineResult.NestedSandboxAccepted.
+	NestedSandboxAccepted bool `json:"nested_sandbox_accepted,omitempty"`
 }
 
 // Validate checks the outcome record.
@@ -42,6 +50,14 @@ func (o OutcomeRecord) Validate() error {
 	case "running", "completed", "aborted", "failed":
 	default:
 		return fmt.Errorf("invalid outcome status %q", o.Status)
+	}
+	switch o.VerificationOutcome {
+	case "", VerificationOutcomeVerified, VerificationOutcomeCommandPassed, VerificationOutcomeUnverified:
+	default:
+		return fmt.Errorf("invalid outcome verification_outcome %q", o.VerificationOutcome)
+	}
+	if err := ValidateVerificationChecks(o.VerificationChecks, o.Verified); err != nil {
+		return fmt.Errorf("outcome: %w", err)
 	}
 	return nil
 }
@@ -373,6 +389,9 @@ type InteractionRecord struct {
 	Repairs   int          `json:"repairs"`
 	Resolved  bool         `json:"resolved"`
 	LatencyMs int          `json:"latency_ms"`
+	// RepairNoProgress is true only when the repair loop stopped with
+	// repair_no_progress. No other return sets it.
+	RepairNoProgress bool `json:"repair_no_progress,omitempty"`
 }
 
 // Validate checks the interaction record.

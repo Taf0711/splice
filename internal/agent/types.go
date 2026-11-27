@@ -547,6 +547,13 @@ type Options struct {
 	// config. The runtime resolves it after workspace trust.
 	Pipeline string
 	Sandbox  *sandbox.Engine
+	// AcceptNestedSandbox is the user acceptance of a nested run: when Splice
+	// already runs inside a sandbox, pipeline stage commands, command nodes,
+	// and agent nodes run under the outer sandbox instead of refusing. It
+	// comes from the user config (sandbox.acceptNestedSandbox) or the
+	// --accept-nested-sandbox flag of splice exec. The agent loop does not
+	// read it.
+	AcceptNestedSandbox bool
 	// FileTracker records per-session file read/write versions so the write tools
 	// can detect a file changed on disk outside Splice since it was last read. nil
 	// disables the check. Created once per session and threaded into every tool run.

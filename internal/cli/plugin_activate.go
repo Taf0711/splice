@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Taf0711/splice/internal/agent"
+	"github.com/Taf0711/splice/internal/config"
 	"github.com/Taf0711/splice/internal/hooks"
 	"github.com/Taf0711/splice/internal/plugins"
 	"github.com/Taf0711/splice/internal/tools"
@@ -49,7 +50,7 @@ func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDep
 		writePluginActivationWarning(stderr, formatLoadDiagnostic(diagnostic))
 	}
 
-	result := plugins.Activate(registry, loaded.Plugins, plugins.ActivateOptions{Cwd: workspaceRoot})
+	result := plugins.Activate(registry, loaded.Plugins, plugins.ActivateOptions{Cwd: workspaceRoot, HostExecution: pluginHostExecution(workspaceRoot, deps)})
 	for _, warning := range result.Warnings {
 		writePluginActivationWarning(stderr, warning)
 	}
@@ -68,6 +69,27 @@ func activatePlugins(workspaceRoot string, registry *tools.Registry, deps appDep
 	}
 
 	return pluginActivation{hooks: result.Hooks, skillRoots: result.SkillRoots}
+}
+
+// pluginHostExecution returns the plugin ids that the user config opts into
+// host execution (plugins.<id>.hostExecution). config.Resolve reads that
+// section from the user layer only. A config error yields no opt-ins, so every
+// plugin stays sandboxed.
+func pluginHostExecution(workspaceRoot string, deps appDeps) map[string]bool {
+	if deps.resolveConfig == nil {
+		return nil
+	}
+	resolved, err := deps.resolveConfig(workspaceRoot, config.Overrides{})
+	if err != nil {
+		return nil
+	}
+	host := map[string]bool{}
+	for id, settings := range resolved.Plugins {
+		if settings.HostExecution {
+			host[id] = true
+		}
+	}
+	return host
 }
 
 // skillInfos resolves the reusable skills the model can load via the skill tool —

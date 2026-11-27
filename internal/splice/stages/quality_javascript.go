@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -82,6 +83,7 @@ func (c jsSyntaxCheck) Run(ctx context.Context, req VerificationCheckRequest) (V
 			}
 			defer plan.Cleanup()
 			out, runErr = cmd.CombinedOutput()
+			procrun.ReportRun(runCtx, cmd, runErr)
 			if runErr != nil {
 				if errors.Is(runErr, exec.ErrNotFound) ||
 					strings.Contains(strings.ToLower(runErr.Error()), "executable file not found") {

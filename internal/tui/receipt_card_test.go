@@ -2,11 +2,14 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Taf0711/splice/internal/agent"
 	"github.com/Taf0711/splice/internal/presentation"
+	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
 func stripANSI(s string) string {
@@ -161,7 +164,7 @@ func TestCancelErrorProjectsCancelledReceipt(t *testing.T) {
 // An unverified run renders the UNVERIFIED card: the title says NOT VERIFIED,
 // the body names the reason, and the bare word VERIFIED never appears.
 func TestUnverifiedReceiptNeverReadsVerified(t *testing.T) {
-	card := unverifiedReceiptCard("no check applied: static_analyzer (No applicable files to verify.)", "3.0s")
+	card := unverifiedReceiptCard("no check applied: static_analyzer (No applicable files to verify.)", nil, "3.0s")
 	if card.kind != receiptUnverified {
 		t.Fatalf("kind = %q, want unverified", card.kind)
 	}
@@ -176,8 +179,58 @@ func TestUnverifiedReceiptNeverReadsVerified(t *testing.T) {
 	}
 }
 
+// A test command that passed with no per-test evidence has its own receipt:
+// TEST COMMAND PASSED, with the same kind and visual weight as NOT VERIFIED.
+// The renderer picks the style by kind, so the unverified kind proves the card
+// never takes the VERIFIED success color.
+func TestCommandPassedReceiptIsNotVerified(t *testing.T) {
+	card := unverifiedReceiptFromState("test command passed; per-test evidence unavailable", true, nil, time.Time{}, time.Time{})
+	if card.kind != receiptUnverified {
+		t.Fatalf("kind = %q, want unverified (never the verified style)", card.kind)
+	}
+	if card.title != "DONE · TEST COMMAND PASSED" {
+		t.Fatalf("title = %q, want DONE · TEST COMMAND PASSED", card.title)
+	}
+	view := plainRender(t, renderReceiptCard(card, 80, presentation.GlyphTierASCII))
+	for _, want := range []string{"[!] DONE · TEST COMMAND PASSED", "Per-test evidence is not available. The run is not verified.", "[O] open diff"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("command-passed receipt missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "VERIFIED") {
+		t.Fatalf("command-passed receipt reads as VERIFIED:\n%s", view)
+	}
+	decoded, ok := parseReceiptTranscriptPayload(receiptTranscriptPayload(card))
+	if !ok || decoded.title != card.title || decoded.kind != receiptUnverified {
+		t.Fatalf("round-trip = %+v, want the command-passed card", decoded)
+	}
+
+	// The live path: a completion receipt marked command_passed.
+	m := mouseTestModel()
+	m.sessionStore = testSessionStore(t)
+	m.activeRunID = 9
+	m.width, m.height, m.altScreen = 100, 40, true
+	m.lastState = presentation.State{
+		SchemaVersion: presentation.PresentationSchemaVersionV1,
+		Lifecycle:     presentation.LifecycleComplete,
+		Completion:    &presentation.CompletionReceipt{Status: "completed", Detail: "test command passed; per-test evidence unavailable", Unverified: true, CommandPassed: true},
+	}
+	updated, _ := m.Update(planExecutionResultMsg{
+		runID:  9,
+		result: agent.Result{FinalAnswer: `{"plan_id":"p","status":"completed","completed_tasks":[{"task_id":"t1","run_id":"r1","status":"completed"}]}`},
+	})
+	next := updated.(model)
+	if next.lastTerminalReceipt != receiptUnverified {
+		t.Fatalf("lastTerminalReceipt = %q, want unverified", next.lastTerminalReceipt)
+	}
+	live := plainRender(t, next.View())
+	if !strings.Contains(live, "TEST COMMAND PASSED") || !strings.Contains(live, "The run is not verified.") {
+		t.Fatalf("live view lacks the command-passed receipt:\n%s", live)
+	}
+}
+
 func TestUnverifiedReceiptPayloadRoundTrip(t *testing.T) {
-	original := unverifiedReceiptCard("no tests ran", "")
+	original := unverifiedReceiptCard("no tests ran", nil, "")
 	decoded, ok := parseReceiptTranscriptPayload(receiptTranscriptPayload(original))
 	if !ok {
 		t.Fatal("unverified payload failed to round-trip")
@@ -273,5 +326,159 @@ func TestVerifiedRunShowsReceiptNotRawPlanJSON(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("a result no card can be built from lost its raw text")
+	}
+}
+
+// TestPipelineReceiptNamesVerificationChecks pins the per-check receipt
+// lines. A VERIFIED card names what verified it. A scanner-only verification
+// says on its own line that no tests ran, never with the [+] evidence mark.
+// The NOT VERIFIED and TEST COMMAND PASSED cards list each check, and only a
+// verified run gets the success kind.
+func TestPipelineReceiptNamesVerificationChecks(t *testing.T) {
+	testsPassed := schemas.VerificationCheck{Name: "test_runner", Kind: schemas.CheckKindTests, Outcome: schemas.CheckPassed, Detail: "12 passed, 0 failed, per-test evidence"}
+	testsFailed := schemas.VerificationCheck{Name: "test_runner", Kind: schemas.CheckKindTests, Outcome: schemas.CheckFailed, Detail: "10 passed, 2 failed, per-test evidence"}
+	noTests := schemas.VerificationCheck{Name: "test_runner", Kind: schemas.CheckKindTests, Outcome: schemas.CheckNoTests, Detail: "no tests ran"}
+	commandPassed := schemas.VerificationCheck{Name: "test_runner", Kind: schemas.CheckKindTests, Outcome: schemas.CheckCommandPassed, Detail: "exit code 0, per-test evidence unavailable"}
+	scanner := schemas.VerificationCheck{Name: "security_auditor", Kind: schemas.CheckKindSecurityScan, Outcome: schemas.CheckPassed, Detail: "bandit"}
+	static := schemas.VerificationCheck{Name: "static_analyzer", Kind: schemas.CheckKindStaticAnalysis, Outcome: schemas.CheckNotApplicable, Detail: "No applicable files to verify."}
+
+	cases := []struct {
+		name      string
+		result    schemas.PipelineResult
+		wantKind  receiptKind
+		wantTitle string
+		want      []string
+		notWant   []string
+	}{
+		{
+			name:      "tests and scanner verified",
+			result:    schemas.PipelineResult{Verified: true, VerificationOutcome: schemas.VerificationOutcomeVerified, VerificationChecks: []schemas.VerificationCheck{testsPassed, scanner}},
+			wantKind:  receiptVerified,
+			wantTitle: "VERIFIED",
+			want:      []string{"[+] Verified by: tests (12 passed, 0 failed, per-test evidence), security scan (bandit)"},
+			notWant:   []string{"Tests:", "no tests ran"},
+		},
+		{
+			name:      "scanner only verified",
+			result:    schemas.PipelineResult{Verified: true, VerificationOutcome: schemas.VerificationOutcomeVerified, VerificationChecks: []schemas.VerificationCheck{noTests, scanner, static}},
+			wantKind:  receiptVerified,
+			wantTitle: "VERIFIED",
+			want:      []string{"[+] Verified by: security scan (bandit)", "  Tests: no tests ran.", "  Other checks: static analysis: not applicable (No applicable files to verify.)"},
+			notWant:   []string{"[+] Tests", "[+] Other", "tests ("},
+		},
+		{
+			name:      "command passed",
+			result:    schemas.PipelineResult{VerificationOutcome: schemas.VerificationOutcomeCommandPassed, UnverifiedReason: "test command passed; per-test evidence unavailable", VerificationChecks: []schemas.VerificationCheck{commandPassed}},
+			wantKind:  receiptUnverified,
+			wantTitle: "DONE · TEST COMMAND PASSED",
+			want:      []string{"tests: command passed (exit code 0, per-test evidence unavailable)"},
+			notWant:   []string{"[+]"},
+		},
+		{
+			name:      "failed tests with a passed scanner",
+			result:    schemas.PipelineResult{VerificationOutcome: schemas.VerificationOutcomeUnverified, UnverifiedReason: "tests failed", VerificationChecks: []schemas.VerificationCheck{testsFailed, scanner}},
+			wantKind:  receiptUnverified,
+			wantTitle: "DONE · NOT VERIFIED",
+			want:      []string{"tests failed", "tests: failed (10 passed, 2 failed, per-test evidence)", "security scan: passed (bandit)"},
+			notWant:   []string{"[+]", "Verified by"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.result.RunID, tc.result.Status, tc.result.Tier = "run-1", "completed", schemas.TierLight
+			encoded, err := json.Marshal(tc.result)
+			if err != nil {
+				t.Fatalf("setup: marshal result: %v", err)
+			}
+			card, ok := pipelineTurnReceipt(string(encoded), "", nil, nil, time.Time{}, time.Time{})
+			if !ok {
+				t.Fatal("no receipt card")
+			}
+			if card.kind != tc.wantKind || card.title != tc.wantTitle {
+				t.Fatalf("card kind %q title %q, want %q %q", card.kind, card.title, tc.wantKind, tc.wantTitle)
+			}
+			joined := strings.Join(card.lines, "\n")
+			for _, want := range tc.want {
+				trimmed := strings.TrimPrefix(want, "  ")
+				if !strings.Contains(joined, trimmed) {
+					t.Errorf("card lines lack %q:\n%s", trimmed, joined)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if strings.Contains(joined, notWant) {
+					t.Errorf("card lines contain %q:\n%s", notWant, joined)
+				}
+			}
+			// Narrow terminal: the card wraps and keeps every word.
+			view := plainRender(t, renderReceiptCard(card, 48, presentation.GlyphTierASCII))
+			for _, word := range []string{"bandit", "tests"} {
+				if strings.Contains(joined, word) && !strings.Contains(view, word) {
+					t.Errorf("narrow render lost %q:\n%s", word, view)
+				}
+			}
+			decoded, ok := parseReceiptTranscriptPayload(receiptTranscriptPayload(card))
+			if !ok || strings.Join(decoded.lines, "\n") != joined {
+				t.Fatalf("payload round trip lost the check lines: %+v", decoded)
+			}
+		})
+	}
+}
+
+// TestPipelineReceiptShowsAcceptedNestedRun checks a result that ran under an
+// outer sandbox the user accepted shows the plain line in every state,
+// VERIFIED included, never with the [+] success mark. A result without the
+// flag has no such line.
+func TestPipelineReceiptShowsAcceptedNestedRun(t *testing.T) {
+	passed := schemas.VerificationCheck{Name: "test_runner", Kind: schemas.CheckKindTests, Outcome: schemas.CheckPassed, Detail: "1 passed, 0 failed, per-test evidence"}
+	abort := "tests failed twice"
+	results := map[string]schemas.PipelineResult{
+		"verified":   {Status: "completed", Verified: true, VerificationOutcome: schemas.VerificationOutcomeVerified, VerificationChecks: []schemas.VerificationCheck{passed}},
+		"unverified": {Status: "completed", VerificationOutcome: schemas.VerificationOutcomeUnverified, UnverifiedReason: "no tests ran"},
+		"failed":     {Status: "aborted", AbortReason: &abort},
+		"cancelled":  {Status: "aborted", UserAborted: true},
+	}
+	for name, result := range results {
+		t.Run(name, func(t *testing.T) {
+			for _, accepted := range []bool{true, false} {
+				result.RunID, result.Tier, result.NestedSandboxAccepted = "run-1", schemas.TierLight, accepted
+				encoded, err := json.Marshal(result)
+				if err != nil {
+					t.Fatalf("setup: marshal result: %v", err)
+				}
+				card, ok := pipelineTurnReceipt(string(encoded), "", nil, nil, time.Time{}, time.Time{})
+				if !ok {
+					t.Fatal("no receipt card")
+				}
+				count := 0
+				for _, line := range card.lines {
+					if strings.Contains(line, presentation.NestedSandboxAcceptedLine) {
+						count++
+						if line != presentation.NestedSandboxAcceptedLine {
+							t.Errorf("accepted line has extra marks: %q", line)
+						}
+					}
+				}
+				if want := map[bool]int{true: 1, false: 0}[accepted]; count != want {
+					t.Errorf("accepted=%v: the line appears %d time(s), want %d; lines=%q", accepted, count, want, card.lines)
+				}
+			}
+		})
+	}
+}
+
+// TestUnverifiedCompletionCarriesChecks pins the presentation path: an
+// unverified completion receipt carries its checks to the card.
+func TestUnverifiedCompletionCarriesChecks(t *testing.T) {
+	checks := []schemas.VerificationCheck{{Name: "test_runner", Kind: schemas.CheckKindTests, Outcome: schemas.CheckNoTests, Detail: "no tests ran"}}
+	completion := &presentation.CompletionReceipt{Status: "completed", Detail: "no check applied: tests (no tests ran)", Unverified: true, Checks: checks}
+	if err := completion.Validate(); err != nil {
+		t.Fatalf("completion: %v", err)
+	}
+	card, ok := verifiedReceiptCardFor(completion, "", presentation.UsageSummary{}, time.Time{}, time.Time{})
+	if !ok || card.kind != receiptUnverified {
+		t.Fatalf("card = %+v ok=%v, want unverified", card, ok)
+	}
+	if got := strings.Join(card.lines, "|"); got != "no check applied: tests (no tests ran)|tests: no tests ran" {
+		t.Fatalf("card lines = %q", got)
 	}
 }

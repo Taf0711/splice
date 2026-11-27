@@ -159,6 +159,17 @@ func (tool bashTool) run(ctx context.Context, args map[string]any, options RunOp
 	err = command.Run()
 	exitCode := commandExitCode(err)
 	meta["exit_code"] = strconv.Itoa(exitCode)
+	// The run record learns how the spawn ended. The denial mark is read
+	// when Run returns, after the branches below set it.
+	spawnExit := procrun.SpawnExit{
+		ExitCode:  exitCode,
+		TimedOut:  errors.Is(commandCtx.Err(), context.DeadlineExceeded),
+		Escalated: commandEngine == nil && sandboxPermissions == SandboxPermissionsRequireEscalated,
+	}
+	defer func() {
+		spawnExit.LikelyDenied = meta[SandboxLikelyDeniedMeta] == "true"
+		procrun.ReportExit(commandCtx, command, spawnExit)
+	}()
 	stdoutText := stdout.retained()
 	stderrRetained := stderr.retained()
 	stderrText := appendSandboxBlocks(stderrRetained, monitor.Stop())
@@ -290,6 +301,16 @@ func buildBashCommand(ctx context.Context, commandText string, absoluteCwd strin
 	applyWindowsShellCommandLine(prepared.Cmd, commandText, prepared.Plan.Wrapped)
 	return prepared.Cmd, prepared.Plan, nil
 }
+
+// HardenProcessLifetime applies the bash tool's process lifetime rules to
+// command: one process group (a process tree on Windows) that a context
+// cancel kills as a unit, and a bounded pipe drain after the kill. Plugin
+// tool commands and hooks use it.
+func HardenProcessLifetime(command *exec.Cmd) { hardenProcessLifetime(command) }
+
+// AddSandboxMeta records the sandbox plan of a spawn in result meta, with the
+// same keys the bash tool uses.
+func AddSandboxMeta(meta map[string]string, plan zeroSandbox.CommandPlan) { addSandboxMeta(meta, plan) }
 
 func addSandboxMeta(meta map[string]string, plan zeroSandbox.CommandPlan) {
 	if plan.Backend.Name == "" {

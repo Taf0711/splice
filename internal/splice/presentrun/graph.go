@@ -20,6 +20,9 @@ type Graph struct {
 	Tier string `json:"tier,omitempty"`
 	// Live is true when the graph projects a run.
 	Live bool `json:"live"`
+	// FromTopology is true when the graph shows the given topology: false
+	// for a run plan only, and for a topology that the plan no longer matches.
+	FromTopology bool `json:"from_topology,omitempty"`
 	// Nodes are ordered by dependency depth, then by declaration order.
 	Nodes []GraphNode `json:"nodes"`
 	// Notes are notices about the view itself.
@@ -51,6 +54,10 @@ type GraphNode struct {
 	// CostUSD is a lower bound.
 	CostUnpriced bool     `json:"cost_unpriced,omitempty"`
 	Dependencies []string `json:"dependencies,omitempty"`
+	// DependencyPayloads holds the payload of the edge from each entry of
+	// Dependencies, in the same order, with the default applied. It is empty
+	// when the graph has no topology edges, for example for a run plan only.
+	DependencyPayloads []schemas.EdgePayload `json:"dependency_payloads,omitempty"`
 	// SkippedAt lists the tiers where the node is not active. In a live view
 	// it holds the run tier when the run skipped the node.
 	SkippedAt []string `json:"skipped_at,omitempty"`
@@ -158,15 +165,17 @@ func BuildGraph(topology *schemas.PipelineTopology, state presentation.State) (G
 
 	var roster []string
 	deps := map[string][]string{}
+	payloads := map[string][]schemas.EdgePayload{}
 	byName := map[string]schemas.PipelineNode{}
 	if topology != nil {
-		graph.Topology = topology.Name
+		graph.Topology, graph.FromTopology = topology.Name, true
 		for _, node := range topology.Nodes {
 			roster = append(roster, node.Name)
 			byName[node.Name] = node
 		}
 		for _, edge := range topology.Edges {
 			deps[edge.To] = append(deps[edge.To], edge.From)
+			payloads[edge.To] = append(payloads[edge.To], edge.Payload.Effective())
 		}
 	} else {
 		graph.Topology = state.Plan.Topology
@@ -188,10 +197,11 @@ func BuildGraph(topology *schemas.PipelineTopology, state presentation.State) (G
 	nodes := make([]GraphNode, 0, len(roster))
 	for _, name := range roster {
 		row := GraphNode{
-			Name:         name,
-			Kind:         NodeKindForStage(name),
-			Depth:        depth[name],
-			Dependencies: append([]string(nil), deps[name]...),
+			Name:               name,
+			Kind:               NodeKindForStage(name),
+			Depth:              depth[name],
+			Dependencies:       append([]string(nil), deps[name]...),
+			DependencyPayloads: payloads[name],
 		}
 		if node, ok := byName[name]; ok {
 			row.Type = node.Type

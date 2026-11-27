@@ -881,6 +881,126 @@ func TestPlanCritiqueGenuineHighDefectBlocks(t *testing.T) {
 	}
 }
 
+// TestPlanCritiqueUnmarshalAcceptsStringEncodedLists pins that critiques and
+// cross_cutting_concerns decode from a JSON array or from a JSON string that
+// holds that array, and that every other shape is an error.
+func TestPlanCritiqueUnmarshalAcceptsStringEncodedLists(t *testing.T) {
+	const array = `[{"category":"security","severity":"low","issue":"token in log"}]`
+	const concerns = `["retry storm"]`
+	want := PlanCritique{
+		Critiques:            []Critique{{Category: "security", Severity: SeverityLow, Issue: "token in log"}},
+		CrossCuttingConcerns: []string{"retry storm"},
+		OverallAssessment:    "ok",
+	}
+
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"normal arrays", `{"critiques":` + array + `,"cross_cutting_concerns":` + concerns + `,"overall_assessment":"ok"}`},
+		{"string-encoded arrays", `{"critiques":` + jsonString(array) + `,"cross_cutting_concerns":` + jsonString(concerns) + `,"overall_assessment":"ok"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got PlanCritique
+			if err := json.Unmarshal([]byte(tc.payload), &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %+v, want %+v", got, want)
+			}
+		})
+	}
+
+	t.Run("empty string is an empty list", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"critiques":"","cross_cutting_concerns":"","overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(got.Critiques) != 0 || len(got.CrossCuttingConcerns) != 0 {
+			t.Fatalf("want empty lists, got %+v", got)
+		}
+	})
+
+	for name, bad := range map[string]string{
+		"string that is not an array": `{"critiques":"not a list","overall_assessment":"ok"}`,
+		"number":                      `{"critiques":5,"overall_assessment":"ok"}`,
+		"concerns number":             `{"cross_cutting_concerns":5,"overall_assessment":"ok"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var got PlanCritique
+			if err := json.Unmarshal([]byte(bad), &got); err == nil {
+				t.Fatalf("expected error for %s, got %+v", bad, got)
+			}
+		})
+	}
+}
+
+// TestPlanCritiqueConcernsAcceptPlainSentence pins that a plain sentence in
+// cross_cutting_concerns becomes a one-item list, while critiques still reject
+// a plain sentence.
+func TestPlanCritiqueConcernsAcceptPlainSentence(t *testing.T) {
+	t.Run("plain sentence is one item", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"cross_cutting_concerns":"The plan touches two modules.","overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		want := []string{"The plan touches two modules."}
+		if !reflect.DeepEqual(got.CrossCuttingConcerns, want) {
+			t.Fatalf("got %q, want %q", got.CrossCuttingConcerns, want)
+		}
+	})
+
+	t.Run("string-encoded array still decodes", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"cross_cutting_concerns":` + jsonString(`["a","b"]`) + `,"overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if want := []string{"a", "b"}; !reflect.DeepEqual(got.CrossCuttingConcerns, want) {
+			t.Fatalf("got %q, want %q", got.CrossCuttingConcerns, want)
+		}
+	})
+
+	t.Run("normal array still decodes", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"cross_cutting_concerns":["a"],"overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if want := []string{"a"}; !reflect.DeepEqual(got.CrossCuttingConcerns, want) {
+			t.Fatalf("got %q, want %q", got.CrossCuttingConcerns, want)
+		}
+	})
+
+	t.Run("whole critique with plain sentence decodes", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"critiques":[],"cross_cutting_concerns":"The plan touches two modules.","must_fix_before_execution":false,"overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got.OverallAssessment != "ok" || len(got.CrossCuttingConcerns) != 1 {
+			t.Fatalf("unexpected critique %+v", got)
+		}
+	})
+
+	t.Run("plain sentence in critiques is still an error", func(t *testing.T) {
+		var got PlanCritique
+		payload := `{"critiques":"The plan is fine.","overall_assessment":"ok"}`
+		if err := json.Unmarshal([]byte(payload), &got); err == nil {
+			t.Fatalf("expected error, got %+v", got)
+		}
+	})
+}
+
+// jsonString returns s encoded as a JSON string literal.
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 func TestPlanCritiqueEmptySetDoesNotBlock(t *testing.T) {
 	critique := PlanCritique{OverallAssessment: "no issues"}
 	if err := critique.Validate(); err != nil {
@@ -973,5 +1093,279 @@ func TestChangeSummaryOldJSONStillDecodes(t *testing.T) {
 	}
 	if err := summary.Validate(); err != nil {
 		t.Fatalf("decoded old JSON must validate: %v", err)
+	}
+}
+
+// TestVerificationChecksValidate pins the check schema and the consistency
+// rule: a verified result has a passed check and no failed check. A result
+// with no checks (written before the field existed) stays valid.
+func TestVerificationChecksValidate(t *testing.T) {
+	passed := VerificationCheck{Name: "test_runner", Kind: CheckKindTests, Outcome: CheckPassed, Detail: "3 passed, 0 failed"}
+	scanner := VerificationCheck{Name: "security_auditor", Kind: CheckKindSecurityScan, Outcome: CheckPassed, Detail: "bandit"}
+	noTests := VerificationCheck{Name: "test_runner", Kind: CheckKindTests, Outcome: CheckNoTests}
+	failed := VerificationCheck{Name: "test_runner", Kind: CheckKindTests, Outcome: CheckFailed}
+	cases := []struct {
+		name     string
+		checks   []VerificationCheck
+		verified bool
+		wantErr  string
+	}{
+		{name: "verified with a passed check", checks: []VerificationCheck{passed, scanner}, verified: true},
+		{name: "scanner only verified", checks: []VerificationCheck{noTests, scanner}, verified: true},
+		{name: "legacy result without checks", verified: true},
+		{name: "unverified with a failed check", checks: []VerificationCheck{failed, scanner}},
+		{name: "verified with a failed check", checks: []VerificationCheck{failed, scanner}, verified: true, wantErr: "failed check"},
+		{name: "verified with no passed check", checks: []VerificationCheck{noTests}, verified: true, wantErr: "no passed check"},
+		{name: "empty name", checks: []VerificationCheck{{Kind: CheckKindTests, Outcome: CheckPassed}}, wantErr: "name is required"},
+		{name: "unknown kind", checks: []VerificationCheck{{Name: "x", Kind: "lint", Outcome: CheckPassed}}, wantErr: "invalid kind"},
+		{name: "unknown outcome", checks: []VerificationCheck{{Name: "x", Kind: CheckKindTests, Outcome: "green"}}, wantErr: "invalid outcome"},
+		{name: "no_tests on a scanner", checks: []VerificationCheck{{Name: "x", Kind: CheckKindSecurityScan, Outcome: CheckNoTests}}, wantErr: "only valid for kind tests"},
+		{name: "command_passed on acceptance", checks: []VerificationCheck{{Name: "x", Kind: CheckKindAcceptance, Outcome: CheckCommandPassed}}, wantErr: "only valid for kind tests"},
+		{name: "detail too long", checks: []VerificationCheck{{Name: "x", Kind: CheckKindTests, Outcome: CheckPassed, Detail: strings.Repeat("d", 201)}}, wantErr: "the limit is 200"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateVerificationChecks(tc.checks, tc.verified)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want one naming %q", err, tc.wantErr)
+			}
+			// PipelineResult and the trace outcome run the same rule.
+			result := PipelineResult{RunID: "r", Status: "completed", Tier: TierLight, CostCoverage: CostCoverageNotApplicable, Verified: tc.verified, VerificationChecks: tc.checks}
+			if (result.Validate() == nil) != (tc.wantErr == "") {
+				t.Fatalf("PipelineResult.Validate() = %v, want error %v", result.Validate(), tc.wantErr != "")
+			}
+			outcome := OutcomeRecord{Status: "completed", Verified: tc.verified, VerificationChecks: tc.checks}
+			if (outcome.Validate() == nil) != (tc.wantErr == "") {
+				t.Fatalf("OutcomeRecord.Validate() = %v, want error %v", outcome.Validate(), tc.wantErr != "")
+			}
+		})
+	}
+}
+
+// TestSandboxEvidenceValidate pins the evidence schema: the closed sets, the
+// program shape (no path, no assignment, no space), the refusal rules, and
+// the per-stage bound on StageRecord.
+func TestSandboxEvidenceValidate(t *testing.T) {
+	valid := func() SandboxEvidence {
+		return SandboxEvidence{
+			Stage: "test_runner", Iteration: 1, Source: SandboxSourceBashTool, Program: "pytest",
+			Policy:  SandboxPolicySummary{Source: SandboxPolicyStage, Mode: "enforce", Network: "deny", EnforceWorkspace: true, WriteRoots: 2, DenyRead: 9},
+			Backend: "macos-seatbelt", EnforcementLevel: "native", Wrapped: true,
+			Outcome: SandboxOutcomeRan, Exit: SandboxExitOK,
+		}
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*SandboxEvidence)
+		wantErr string
+	}{
+		{name: "valid"},
+		{name: "refused", mutate: func(e *SandboxEvidence) {
+			e.Outcome, e.Refusal, e.Exit = SandboxOutcomeRefused, SandboxRefusalNoEnforcingSandbox, ""
+		}},
+		{name: "denied with exit ok (network denial)", mutate: func(e *SandboxEvidence) { e.Outcome = SandboxOutcomeDenied }},
+		{name: "no policy", mutate: func(e *SandboxEvidence) { e.Policy = SandboxPolicySummary{Source: SandboxPolicyNone} }},
+		{name: "missing stage", mutate: func(e *SandboxEvidence) { e.Stage = "" }, wantErr: "stage is required"},
+		{name: "unknown source", mutate: func(e *SandboxEvidence) { e.Source = "shell" }, wantErr: "invalid source"},
+		{name: "path program", mutate: func(e *SandboxEvidence) { e.Program = "/usr/bin/pytest" }, wantErr: "not a plain program name"},
+		{name: "assignment program", mutate: func(e *SandboxEvidence) { e.Program = "TOKEN=abc" }, wantErr: "not a plain program name"},
+		{name: "command line program", mutate: func(e *SandboxEvidence) { e.Program = "pytest -k x" }, wantErr: "not a plain program name"},
+		{name: "long program", mutate: func(e *SandboxEvidence) { e.Program = strings.Repeat("a", 33) }, wantErr: "not a plain program name"},
+		{name: "refused with no category", mutate: func(e *SandboxEvidence) { e.Outcome, e.Exit = SandboxOutcomeRefused, "" }, wantErr: "invalid refusal"},
+		{name: "refused with an exit", mutate: func(e *SandboxEvidence) {
+			e.Outcome, e.Refusal = SandboxOutcomeRefused, SandboxRefusalPermissionDenied
+		}, wantErr: "has no exit status"},
+		{name: "ran with a refusal", mutate: func(e *SandboxEvidence) { e.Refusal = SandboxRefusalPolicy }, wantErr: "has refusal"},
+		{name: "ran with no exit", mutate: func(e *SandboxEvidence) { e.Exit = "" }, wantErr: "invalid exit"},
+		{name: "unknown outcome", mutate: func(e *SandboxEvidence) { e.Outcome = "skipped" }, wantErr: "invalid outcome"},
+		{name: "policy none with a mode", mutate: func(e *SandboxEvidence) { e.Policy.Source = SandboxPolicyNone }, wantErr: "no mode or network"},
+		{name: "bad backend label", mutate: func(e *SandboxEvidence) { e.Backend = "Seatbelt /usr/bin" }, wantErr: "invalid sandbox label"},
+		{name: "negative count", mutate: func(e *SandboxEvidence) { e.Policy.DenyRead = -1 }, wantErr: "non-negative"},
+		{name: "nested accepted", mutate: func(e *SandboxEvidence) {
+			e.Wrapped, e.EnforcementLevel, e.NestedAccepted = false, "disabled", true
+		}},
+		{name: "nested accepted but wrapped", mutate: func(e *SandboxEvidence) { e.NestedAccepted = true }, wantErr: "is not wrapped"},
+		{name: "nested accepted with no policy", mutate: func(e *SandboxEvidence) {
+			e.Wrapped, e.NestedAccepted, e.Policy = false, true, SandboxPolicySummary{Source: SandboxPolicyNone}
+		}, wantErr: "has a sandbox policy"},
+		{name: "nested accepted but refused", mutate: func(e *SandboxEvidence) {
+			e.Wrapped, e.NestedAccepted = false, true
+			e.Outcome, e.Refusal, e.Exit = SandboxOutcomeRefused, SandboxRefusalPolicy, ""
+		}, wantErr: "accepted nested spawn ran"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			evidence := valid()
+			if tc.mutate != nil {
+				tc.mutate(&evidence)
+			}
+			err := evidence.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want one naming %q", err, tc.wantErr)
+			}
+		})
+	}
+
+	record := StageRecord{Name: "test_runner", Iteration: 1, Status: StageCompleted, SandboxEvidence: []SandboxEvidence{valid()}}
+	if err := record.Validate(); err != nil {
+		t.Fatalf("record with evidence: %v", err)
+	}
+	other := record
+	other.Iteration = 2
+	if err := other.Validate(); err == nil || !strings.Contains(err.Error(), "names stage test_runner iteration 1") {
+		t.Fatalf("evidence of another iteration validated: %v", err)
+	}
+	over := record
+	for len(over.SandboxEvidence) <= MaxSandboxEvidencePerStage {
+		over.SandboxEvidence = append(over.SandboxEvidence, valid())
+	}
+	if err := over.Validate(); err == nil || !strings.Contains(err.Error(), "the limit is") {
+		t.Fatalf("record over the bound validated: %v", err)
+	}
+	dropped := record
+	dropped.SandboxEvidenceDropped = -1
+	if err := dropped.Validate(); err == nil {
+		t.Fatal("negative dropped count validated")
+	}
+	// A legacy record without the field stays valid.
+	if err := (StageRecord{Name: "test_runner", Status: StageCompleted}).Validate(); err != nil {
+		t.Fatalf("legacy record: %v", err)
+	}
+}
+
+// sizedTopology builds a valid chain of command nodes with the given counts.
+// Its edges go from each node to a later one, so it has no cycle.
+func sizedTopology(nodes, edges int) PipelineTopology {
+	topology := PipelineTopology{Version: TopologySchemaVersion, Name: "sized", MinSplice: AgentNodeMinSplice}
+	for i := 0; i < nodes; i++ {
+		topology.Nodes = append(topology.Nodes, PipelineNode{Name: fmt.Sprintf("n%d", i), Type: NodeTypeCommand, Command: []string{"true"}})
+	}
+	for i := 0; len(topology.Edges) < edges; i++ {
+		for j := i + 1; j < nodes && len(topology.Edges) < edges; j++ {
+			topology.Edges = append(topology.Edges, PipelineEdge{From: fmt.Sprintf("n%d", i), To: fmt.Sprintf("n%d", j)})
+		}
+	}
+	return topology
+}
+
+// TestTopologySizeLimitsAreInclusive pins that a topology at the node and edge
+// limits loads, and one over either limit is refused with its count.
+func TestTopologySizeLimitsAreInclusive(t *testing.T) {
+	tests := []struct {
+		name         string
+		nodes, edges int
+		want         string
+	}{
+		{"nodes at the limit", MaxTopologyNodes, 0, ""},
+		{"nodes over the limit", MaxTopologyNodes + 1, 0, fmt.Sprintf("%d nodes exceed the limit of %d", MaxTopologyNodes+1, MaxTopologyNodes)},
+		{"edges at the limit", MaxTopologyNodes, MaxTopologyEdges, ""},
+		{"edges over the limit", MaxTopologyNodes, MaxTopologyEdges + 1, fmt.Sprintf("%d edges exceed the limit of %d", MaxTopologyEdges+1, MaxTopologyEdges)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := sizedTopology(tc.nodes, tc.edges).Validate()
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate() = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A failure that was already present before the run is not a new failure.
+// The same test name in two Go packages is two tests.
+func TestMarkAlreadyFailingUsesPackageIdentity(t *testing.T) {
+	baseline := TestRunResults{Command: []string{"go", "test"}, Evidence: TestEvidencePerTest, Tests: []TestCaseResult{
+		{Name: "example.com/a.TestSame", Package: "example.com/a", Status: "failed"},
+		{Name: "example.com/b.TestSame", Package: "example.com/b", Status: "passed"},
+	}}
+	results := TestRunResults{Command: []string{"go", "test"}, Evidence: TestEvidencePerTest, Tests: []TestCaseResult{
+		{Name: "example.com/a.TestSame", Package: "example.com/a", Status: "failed"},
+		{Name: "example.com/b.TestSame", Package: "example.com/b", Status: "failed"},
+		{Name: "example.com/c.TestNew", Package: "example.com/c", Status: "errored"},
+	}}
+	if got := MarkAlreadyFailing(&results, baseline); got != 1 {
+		t.Fatalf("MarkAlreadyFailing = %d, want 1", got)
+	}
+	if !results.Tests[0].AlreadyFailing {
+		t.Fatal("package a test failed in the baseline and must be marked")
+	}
+	if results.Tests[1].AlreadyFailing {
+		t.Fatal("package b test passed in the baseline and must not be marked")
+	}
+	if results.Tests[2].AlreadyFailing {
+		t.Fatal("a new failing test must not be marked")
+	}
+	if got := results.Failed(); got != 2 {
+		t.Fatalf("Failed() = %d, want 2 new failures", got)
+	}
+	if got := results.FailedBefore(); got != 1 {
+		t.Fatalf("FailedBefore() = %d, want 1", got)
+	}
+}
+
+// Pytest entries have no package. Their node ids keep them apart.
+func TestMarkAlreadyFailingPytestNodeIDs(t *testing.T) {
+	baseline := TestRunResults{Command: []string{"pytest"}, Evidence: TestEvidencePerTest, Tests: []TestCaseResult{
+		{Name: "tests/test_a.py::test_x", Status: "failed"},
+	}}
+	results := TestRunResults{Command: []string{"pytest"}, Evidence: TestEvidencePerTest, Tests: []TestCaseResult{
+		{Name: "tests/test_a.py::test_x", Status: "failed"},
+		{Name: "tests/test_b.py::test_x", Status: "failed"},
+	}}
+	if got := MarkAlreadyFailing(&results, baseline); got != 1 {
+		t.Fatalf("MarkAlreadyFailing = %d, want 1", got)
+	}
+	if !results.Tests[0].AlreadyFailing || results.Tests[1].AlreadyFailing {
+		t.Fatalf("marks = %v, %v; want test_a marked and test_b not", results.Tests[0].AlreadyFailing, results.Tests[1].AlreadyFailing)
+	}
+}
+
+func TestAlreadyFailingOnlyOnFailedOrErrored(t *testing.T) {
+	bad := TestCaseResult{Name: "t", Status: "passed", AlreadyFailing: true}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("a passed test must not carry AlreadyFailing")
+	}
+	ok := TestCaseResult{Name: "t", Status: "failed", AlreadyFailing: true}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("failed test with AlreadyFailing: %v", err)
+	}
+}
+
+// A test whose failure kind changed is new: errored at base and failed now,
+// or failed at base and errored now. Only the same failing status is marked.
+func TestMarkAlreadyFailingStatusChangeIsNew(t *testing.T) {
+	baseline := TestRunResults{Tests: []TestCaseResult{
+		{Name: "example.com/a.TestX", Package: "example.com/a", Status: "errored"},
+		{Name: "example.com/a.TestY", Package: "example.com/a", Status: "failed"},
+	}}
+	results := TestRunResults{Tests: []TestCaseResult{
+		{Name: "example.com/a.TestX", Package: "example.com/a", Status: "failed"},
+		{Name: "example.com/a.TestY", Package: "example.com/a", Status: "errored"},
+		{Name: "example.com/a.TestY", Package: "example.com/a", Status: "failed"},
+	}}
+	if got := MarkAlreadyFailing(&results, baseline); got != 1 {
+		t.Fatalf("MarkAlreadyFailing = %d, want 1 (only the unchanged failure)", got)
+	}
+	if results.Tests[0].AlreadyFailing || results.Tests[1].AlreadyFailing {
+		t.Fatal("a status change must count as a new failure")
+	}
+	if !results.Tests[2].AlreadyFailing {
+		t.Fatal("the unchanged failure must be marked")
 	}
 }

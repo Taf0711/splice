@@ -13,9 +13,10 @@ Your input is a typed JSON structure containing only what you need. Depending on
 your role it may include the distilled intent, relevant context, prior stage
 summaries, memory observations, or revision context.
 
-Prior stage summaries flow forward, but the user's original raw prompt does
-not. Memory observations from earlier runs may appear in the memory field; use
-them only when they are directly relevant.
+Prior stage summaries flow forward. Your input may include the user's request
+as written, bounded at 32 KiB, or only the distilled intent. Use the request
+when your role implements the task. Memory observations from earlier runs may
+appear in the memory field; use them only when they are directly relevant.
 
 When present, your input also carries `pipeline_stages` (the full ordered
 list of stage names in this run) and `next_stage` (the stage that consumes

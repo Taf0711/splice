@@ -880,6 +880,9 @@ func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, 
 		outcome.AbortReason = abortReason
 	}
 
+	// F4: the trace keeps the distilled intent, never the full request text.
+	tracePlan := tr.plan
+	tracePlan.Request = ""
 	trace := schemas.RunOutcome{
 		SchemaVersion: schemas.TraceSchemaVersion,
 		RunID:         tr.runID,
@@ -887,7 +890,7 @@ func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, 
 		RepoRoot:      tr.projectRoot,
 		Intent:        tr.plan.RequestIntent,
 		Tier:          string(tr.plan.Tier),
-		Plan:          &tr.plan,
+		Plan:          &tracePlan,
 		Iterations:    tr.history,
 		PassEvidence:  tr.passEvidence,
 		Stages:        stages,
@@ -920,6 +923,9 @@ func (tr *runTraceAccumulator) buildOutcome(stageRecords []schemas.StageRecord, 
 func (tr *runTraceAccumulator) buildRunOutcome(result schemas.PipelineResult) (schemas.RunOutcome, error) {
 	outcome, err := tr.buildOutcome(result.Stages, result.Status, abortReason(result))
 	outcome.Outcome.Verified = result.Verified
+	outcome.Outcome.VerificationOutcome = result.VerificationOutcome
+	outcome.Outcome.VerificationChecks = append([]schemas.VerificationCheck(nil), result.VerificationChecks...)
+	outcome.Outcome.NestedSandboxAccepted = result.NestedSandboxAccepted
 	return outcome, err
 }
 

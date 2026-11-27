@@ -812,6 +812,145 @@ func TestUnreachableUpstreamRerunsTheSequence(t *testing.T) {
 	}
 }
 
+// rateLimitStdout is the stream of a run that the provider's usage limit
+// stopped: a failed stage reason and the error event that ends the run.
+const rateLimitStdout = `{"schemaVersion":2,"type":"stage","name":"code_writer","status":"failed","reason":"code_writer: stream error: rate limit error: The usage limit has been reached"}
+{"type":"error","code":"incomplete","message":"stream error: rate limit error: The usage limit has been reached","recoverable":false}
+`
+
+// captureStderr returns what fn writes to os.Stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = f
+	fn()
+	os.Stderr = old
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// TestRateLimitedAttemptRetriesWithoutRecordingAFailure: a usage limit is a
+// provider state, not a model failure. The runner waits 15 minutes and reruns
+// the sequence; only the rerun is recorded.
+func TestRateLimitedAttemptRetriesWithoutRecordingAFailure(t *testing.T) {
+	limited := ExecResult{Stdout: []byte(rateLimitStdout)}
+	outDir := t.TempDir()
+	calls := 0
+	seam := func(_ context.Context, _ ExecRequest) (ExecResult, error) {
+		calls++
+		if calls <= 2 {
+			return limited, nil
+		}
+		return telemetryFinal(t, "run-ok", intPtr(0)), nil
+	}
+	r, err := NewRunner(Config{
+		Binary: "/bin/true", OutDir: outDir, Repeats: 1, Arms: []Arm{ArmCold},
+		Tasks: []Task{{ID: "t1", Prompt: "do", Check: "true"}},
+	}, seam)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits []time.Duration
+	r.sleep = func(d time.Duration) { waits = append(waits, d) }
+	var runErr error
+	stderr := captureStderr(t, func() { _, runErr = r.Run(context.Background()) })
+	if runErr != nil {
+		t.Fatalf("Run: %v", runErr)
+	}
+	if calls != 3 || len(waits) != 2 {
+		t.Fatalf("calls = %d waits = %v, want 3 and 2 waits", calls, waits)
+	}
+	for _, d := range waits {
+		if d != 15*time.Minute {
+			t.Fatalf("wait = %s, want 15m0s", d)
+		}
+	}
+	if n := strings.Count(stderr, "provider usage limit reached; retry"); n != 2 {
+		t.Fatalf("retry log lines = %d, want 2; stderr = %q", n, stderr)
+	}
+	if !strings.Contains(stderr, "sequence 0 arm cold repeat 0: provider usage limit reached; retry 1 of 32 in 15m0s") {
+		t.Fatalf("retry log = %q", stderr)
+	}
+	matches, _ := filepath.Glob(filepath.Join(outDir, "*", "attempt-t1-cold-r0.json"))
+	if len(matches) != 1 {
+		t.Fatalf("attempt files = %v, want one", matches)
+	}
+	raw, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Attempt
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RateLimited || got.RunID != "run-ok" || got.RunStatus == "infrastructure_failed" {
+		t.Fatalf("recorded attempt = %+v, want only the successful rerun", got)
+	}
+}
+
+// TestRateLimitRetriesExhaustedStopsTheCampaign: when the usage limit outlasts
+// the retries, the campaign stops with an error and writes no failed attempt.
+func TestRateLimitRetriesExhaustedStopsTheCampaign(t *testing.T) {
+	outDir := t.TempDir()
+	calls := 0
+	seam := func(_ context.Context, _ ExecRequest) (ExecResult, error) {
+		calls++
+		return ExecResult{Stdout: []byte(rateLimitStdout)}, nil
+	}
+	r, err := NewRunner(Config{
+		Binary: "/bin/true", OutDir: outDir, Repeats: 1, Arms: []Arm{ArmCold},
+		Tasks: []Task{{ID: "t1", Prompt: "do", Check: "true"}},
+	}, seam)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.rateLimitMax = 2
+	r.sleep = func(time.Duration) {}
+	var runErr error
+	captureStderr(t, func() { _, runErr = r.Run(context.Background()) })
+	if runErr == nil || !strings.Contains(runErr.Error(), "usage limit stayed reached after 2 retries") {
+		t.Fatalf("err = %v, want the campaign to stop on the usage limit", runErr)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3 (one run and two retries)", calls)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(outDir, "*", "attempt-*.json")); len(matches) != 0 {
+		t.Fatalf("attempt files = %v, want none", matches)
+	}
+}
+
+// TestRateLimitMatchesErrorsNotModelText: the phrase in a model's text must not
+// trigger the usage-limit schedule. Only error events and failed stage reasons
+// count, and a usage limit never takes the outage schedule.
+func TestRateLimitMatchesErrorsNotModelText(t *testing.T) {
+	quoted := []byte(`{"schemaVersion":2,"type":"reasoning","runId":"r","delta":"The docs say rate limit error: The usage limit has been reached, so I will retry."}
+{"schemaVersion":2,"type":"stage","name":"code_writer","status":"completed","reason":"wrote README noting that the usage limit has been reached"}
+`)
+	if endedOnRateLimit(quoted) {
+		t.Fatal("a model that quotes the usage limit in its text must not count as rate limited")
+	}
+	if !endedOnRateLimit([]byte(rateLimitStdout)) {
+		t.Fatal("the usage-limit stream must count as rate limited")
+	}
+	if endedOnConnectivity([]byte(rateLimitStdout)) {
+		t.Fatal("a usage limit must not take the outage schedule")
+	}
+	outage := []byte(`{"code":"incomplete","message":"stream error: upstream unreachable: the model server could not connect to openrouter.ai (no such host)."}`)
+	if endedOnRateLimit(outage) {
+		t.Fatal("an outage must not count as rate limited")
+	}
+}
+
 func TestLoadTasksetRejectsADuplicateTaskID(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {

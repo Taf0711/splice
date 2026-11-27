@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Taf0711/splice/internal/sandbox/procrun"
 	"github.com/Taf0711/splice/internal/splice/schemas"
 )
 
@@ -148,6 +149,7 @@ func (c sarifCheck) runScanner(ctx context.Context, req VerificationCheckRequest
 	}
 	defer plan.Cleanup()
 	out, err := cmd.CombinedOutput()
+	procrun.ReportRun(ctx, cmd, err)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}

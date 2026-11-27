@@ -11,15 +11,17 @@
 </head>
 <body data-run="{{.RunSeq}}">
 <header class="top">
-<div class="title-row"><h1>Pipeline</h1><span id="topology" class="topology">{{.Topology}}</span>{{if .CanEdit}}<a class="edit-link" href="../editor/?from=active">Edit a copy</a>{{end}}</div>
+<div class="title-row"><h1>Pipeline</h1><span id="topology" class="topology" title="{{.Topology}}">{{.Topology}}</span>{{if .CanEdit}}<a class="edit-link" href="../editor/?from=active">Edit a copy</a>{{end}}</div>
 <p id="facts" class="facts">{{.Facts}}</p>
 <p id="run" class="run" data-state="{{.RunState}}" role="status">{{.Run}}</p>
+{{template "legend"}}
 </header>
 <p id="notice" class="notice" role="alert" hidden></p>
 <ul id="notes" class="notes">{{range .Notes}}<li>{{.}}</li>{{end}}</ul>
 <main class="body">
 <section class="canvas" aria-label="Graph">
-{{if .Problem}}<p class="empty">{{.Problem}}</p>{{else}}<div id="graph" class="graph-scroll">{{template "graph" .Layout}}</div>{{end}}
+{{if .Problem}}<p class="empty">{{.Problem}}</p>{{else}}<div id="graph" class="graph-scroll">{{template "graph" .Layout}}</div>
+<div class="canvas-tools" role="toolbar" aria-label="Graph tools"><button type="button" id="z-out" aria-label="Zoom out">−</button><button type="button" id="z-in" aria-label="Zoom in">+</button><button type="button" id="z-fit">Fit</button><button type="button" id="z-reset">Reset</button></div>{{end}}
 </section>
 <aside id="drawer" class="drawer" aria-labelledby="drawer-title" hidden>
 <div class="drawer-head"><h2 id="drawer-title">Node</h2><button id="drawer-close" type="button">Close <kbd>Esc</kbd></button></div>
@@ -32,19 +34,23 @@
 <div class="timeline-head"><label for="scrub">Timeline</label><output id="scrub-label" for="scrub"></output></div>
 <input id="scrub" type="range" min="1" max="1" value="1" step="1">
 </section>
-{{if .Commands}}<section class="commands"><h2>Command nodes</h2><p class="commands-note">Active topology at page load. {{.CommandCount}}.</p><ul>{{range .Commands}}<li><span class="command-name">{{.Name}}</span> <code>{{.Line}}</code></li>{{end}}</ul></section>{{end}}
-{{if .Agents}}<section class="commands"><h2>Agent nodes</h2><p class="commands-note">Active topology at page load. {{.AgentCount}}. {{.AgentBudget}}.</p><ul>{{range .Agents}}<li><span class="command-name">{{.Name}}</span><dl class="agent-facts"><dt>tools</dt><dd>{{.Tools}}</dd><dt>permission</dt><dd>{{.Permission}}</dd><dt>turns</dt><dd>up to {{.Turns}}</dd><dt>budget</dt><dd>{{.Budget}}</dd><dt>prompt</dt><dd>{{.Prompt}}</dd></dl></li>{{end}}</ul></section>{{end}}
-<footer class="keys"><span><kbd>j</kbd> <kbd>k</kbd> select</span><span><kbd>Enter</kbd> details</span><span><kbd>Esc</kbd> close</span><span><kbd>[</kbd> <kbd>]</kbd> step the timeline</span></footer>
+{{if .Commands}}<section class="commands"><h2>Command nodes</h2><p class="commands-note">{{.Source}} {{.CommandCount}}.</p><ul>{{range .Commands}}<li><span class="command-name">{{.Name}}</span> <code>{{.Line}}</code></li>{{end}}</ul></section>{{end}}
+{{if .Agents}}<section class="commands"><h2>Agent nodes</h2><p class="commands-note">{{.Source}} {{.AgentCount}}. {{.AgentBudget}}.</p><ul>{{range .Agents}}<li><span class="command-name">{{.Name}}</span><dl class="agent-facts"><dt>tools</dt><dd>{{.Tools}}</dd><dt>permission</dt><dd>{{.Permission}}</dd><dt>turns</dt><dd>up to {{.Turns}}</dd><dt>budget</dt><dd>{{.Budget}}</dd><dt>prompt</dt><dd>{{.Prompt}}</dd></dl></li>{{end}}</ul></section>{{end}}
+<footer class="keys"><span><kbd>j</kbd> <kbd>k</kbd> select</span><span><kbd>Enter</kbd> details</span><span><kbd>Esc</kbd> close, then clear the selection</span><span><kbd>[</kbd> <kbd>]</kbd> step the timeline</span><span><kbd>+</kbd> <kbd>-</kbd> <kbd>0</kbd> <kbd>f</kbd> zoom in, out, reset, fit</span></footer>
 </body>
 </html>
-{{end}}{{define "graph"}}<svg class="graph" data-layout="{{.Key}}" width="{{.Width}}" height="{{.Height}}" viewBox="0 0 {{.Width}} {{.Height}}" role="group" aria-label="Pipeline graph">
-<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1 L9 5 L0 9 z"/></marker></defs>
+{{end}}{{define "legend"}}<p class="legend"><span class="legend-title">Edges carry:</span><span><svg width="28" height="8" aria-hidden="true"><path class="edge summary" d="M0 4H28"/></svg>summary</span><span><svg width="28" height="8" aria-hidden="true"><path class="edge output" d="M0 4H28"/></svg>output: summary and data</span><span><svg width="28" height="8" aria-hidden="true"><path class="edge none" d="M0 4H28"/></svg>order: order only, no data</span></p>{{end}}{{define "graph"}}<svg class="graph" data-layout="{{.Key}}" width="{{.Width}}" height="{{.Height}}" viewBox="0 0 {{.Width}} {{.Height}}" role="group" aria-label="Pipeline graph">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 1 L9 5 L0 9 z"/></marker><clipPath id="name-clip"><rect width="{{.NameClip}}" height="26"/></clipPath></defs>
 <g class="edges">{{range .Edges}}
-<path class="edge{{if .Flowed}} flowed{{end}}" data-from="{{.From}}" data-to="{{.To}}" d="{{.Path}}" marker-end="url(#arrow)"/>{{end}}
+<path class="edge{{if .Payload}} {{.Payload}}{{end}}{{if .Flowed}} flowed{{end}}" data-from="{{.From}}" data-to="{{.To}}" d="{{.Path}}" marker-end="url(#arrow)"/>{{end}}
+</g>
+<g class="pills">{{range .Edges}}{{if .Pill}}
+<g class="pill" data-from="{{.From}}" data-to="{{.To}}" transform="translate({{.MidX}} {{.MidY}})"><rect x="{{.PillLeft}}" y="-8" width="{{.PillWidth}}" height="16" rx="8"/><text y="4" text-anchor="middle">{{.Pill}}</text></g>{{end}}{{end}}
 </g>
 <g class="nodes">{{range .Nodes}}
-<g class="node s-{{.Frame.Status}}" data-name="{{.Frame.Name}}" data-iteration="{{.Frame.Iteration}}" transform="translate({{.X}} {{.Y}})" tabindex="-1" role="button" aria-label="{{.Frame.Name}}, {{.Frame.Label}}"><title>{{.Frame.Name}}
+<g class="node s-{{.Frame.Status}}" data-name="{{.Frame.Name}}" data-iteration="{{.Frame.Iteration}}" transform="translate({{.X}} {{.Y}})" tabindex="-1" role="button" aria-label="{{.Frame.Name}}, {{.Frame.Label}}, {{.Receives}}"><title>{{.Frame.Name}}
 {{.Subtitle}}
-{{.Frame.Label}}</title><rect class="ring" x="-5" y="-5" width="{{$.RingWidth}}" height="{{$.RingHeight}}" rx="12"/><rect class="box" width="{{$.NodeWidth}}" height="{{$.NodeHeight}}" rx="8"/><text class="n-name" x="14" y="24">{{.Drawn}}</text><text class="n-sub" x="14" y="41">{{cut .Subtitle}}</text><text class="n-status" x="14" y="60">{{cut .Frame.Label}}</text><text class="n-meta" x="14" y="76">{{cut .Frame.Meta}}</text></g>{{end}}
+{{.Frame.Label}}
+{{.Receives}}</title><rect class="ring" x="-5" y="-5" width="{{$.RingWidth}}" height="{{$.RingHeight}}" rx="12"/><rect class="box" width="{{$.NodeWidth}}" height="{{$.NodeHeight}}" rx="8"/><path class="band" d="{{$.Band}}"/><text class="n-name" x="14" y="18" clip-path="url(#name-clip)">{{.Drawn}}</text><text class="n-mark" x="{{$.MarkX}}" y="18" text-anchor="end">{{mark .Frame.Label}}</text><text class="n-sub" x="14" y="44">{{cut .Subtitle}}</text><text class="n-status" x="14" y="61">{{cut (words .Frame.Label)}}</text><text class="n-recv" x="14" y="78">{{cut .Receives}}</text><text class="n-meta" x="14" y="95">{{cut .Frame.Meta}}</text></g>{{end}}
 </g>
 </svg>{{end}}

@@ -52,6 +52,12 @@ func (t gosecTool) Safety() tools.Safety {
 }
 
 func (t gosecTool) Run(ctx context.Context, args map[string]any) tools.Result {
+	return t.RunWithOptions(ctx, args, tools.RunOptions{})
+}
+
+// RunWithOptions runs the scanner under the engine the call carries, so the
+// user's read and write denials reach the spawn (see spawnEngine).
+func (t gosecTool) RunWithOptions(ctx context.Context, args map[string]any, options tools.RunOptions) tools.Result {
 	rawPaths, ok := args["paths"]
 	if !ok {
 		return tools.Result{Status: tools.StatusError, Output: "paths is required"}
@@ -89,7 +95,7 @@ func (t gosecTool) Run(ctx context.Context, args map[string]any) tools.Result {
 	prepared, cerr := procrun.Prepare(ctx, procrun.Request{
 		ProfileID:       procrun.ProfileSpliceDTools,
 		AllowedBinaries: procrun.StageBinaries,
-		Engine:          t.sandbox,
+		Engine:          spawnEngine(t.sandbox, t.workspaceRoot, options),
 		Spec:            sandbox.CommandSpec{Name: command[0], Args: command[1:], Dir: t.workspaceRoot},
 	})
 	if cerr != nil {
@@ -102,6 +108,7 @@ func (t gosecTool) Run(ctx context.Context, args map[string]any) tools.Result {
 	cmd := prepared.Cmd
 
 	out, err := cmd.Output()
+	procrun.ReportRun(ctx, cmd, err)
 	if ctx.Err() != nil {
 		return tools.Result{
 			Status: tools.StatusError,

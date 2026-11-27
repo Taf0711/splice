@@ -233,8 +233,25 @@ func TestPrepareReusesExistingGitWorktree(t *testing.T) {
 	if result.Path != existing {
 		t.Fatalf("Path = %q, want existing %q", result.Path, existing)
 	}
-	if len(runner.calls) != 9 {
-		t.Fatalf("expected metadata git calls only, got %#v", runner.calls)
+	want := [][]string{
+		{"rev-parse", "--show-toplevel"},
+		{"rev-parse", "--abbrev-ref", "HEAD"},
+		{"rev-parse", "--short", "HEAD"},
+		{"rev-parse", "--git-common-dir"},
+		{"rev-parse", "--git-common-dir"},
+		{"worktree", "lock", "--reason", "Splice active worktree", existing},
+		{"rev-parse", "HEAD"},
+		{"for-each-ref", "--format=%(refname)", "refs/heads/splice/"},
+		{"worktree", "list", "--porcelain"},
+		{"for-each-ref", "--format=%(refname)", "refs/splice/recovery/"},
+	}
+	if len(runner.calls) != len(want) {
+		t.Fatalf("git calls = %d, want %d: %#v", len(runner.calls), len(want), runner.calls)
+	}
+	for i, args := range want {
+		if got := strings.Join(runner.calls[i].args, " "); got != strings.Join(args, " ") {
+			t.Fatalf("git call %d = %q, want %q", i, got, strings.Join(args, " "))
+		}
 	}
 }
 
@@ -1344,6 +1361,345 @@ func TestRecoveryMergeBackAfterRestore(t *testing.T) {
 	}
 }
 
+func TestRecoveryRestoreLeavesHeadOnTargetParent(t *testing.T) {
+	_, worktree, result := newRecoveryFixture(t)
+	rec := NewIterationRecovery(result)
+	baseHead := strings.TrimSpace(mustGit(t, worktree, "rev-parse", "HEAD"))
+
+	if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("iter0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	iter0Ref, err := rec.Capture(context.Background(), "run-123", 0)
+	if err != nil {
+		t.Fatalf("Capture iter0 returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("iter1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	iter1Ref, err := rec.Capture(context.Background(), "run-123", 1)
+	if err != nil {
+		t.Fatalf("Capture iter1 returned error: %v", err)
+	}
+
+	if err := rec.Restore(context.Background(), iter1Ref, iter0Ref); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+
+	head := strings.TrimSpace(mustGit(t, worktree, "rev-parse", "HEAD"))
+	if head != baseHead {
+		t.Fatalf("HEAD after Restore = %s, want capture-time parent %s", head, baseHead)
+	}
+	if got := readFileString(t, filepath.Join(worktree, "tracked.txt")); got != "iter0\n" {
+		t.Fatalf("tracked.txt = %q, want iter0", got)
+	}
+}
+
+func TestRecoveryRestoreKeepsSnapshotsOutOfMergeHistory(t *testing.T) {
+	root, worktree, result := newRecoveryFixture(t)
+	rec := NewIterationRecovery(result)
+
+	if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("iter0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	iter0Ref, err := rec.Capture(context.Background(), "run-123", 0)
+	if err != nil {
+		t.Fatalf("Capture iter0 returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("iter1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	iter1Ref, err := rec.Capture(context.Background(), "run-123", 1)
+	if err != nil {
+		t.Fatalf("Capture iter1 returned error: %v", err)
+	}
+	if err := rec.Restore(context.Background(), iter1Ref, iter0Ref); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(worktree, "after.txt"), []byte("after restore\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mergeResult, err := MergeBack(context.Background(), MergeBackOptions{
+		RepoRoot:     root,
+		WorktreePath: worktree,
+		Name:         result.Name,
+	})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if mergeResult.Status != MergeBackMerged {
+		t.Fatalf("MergeBack status = %q, want merged (%s)", mergeResult.Status, mergeResult.Message)
+	}
+
+	log := mustGit(t, root, "log", "--format=%ae %s")
+	if strings.Contains(log, "recovery@local") || strings.Contains(log, "splice recovery snapshot") {
+		t.Fatalf("source history contains recovery snapshot:\n%s", log)
+	}
+}
+
+func TestRecoveryRestoreUndoesWorktreeCommit(t *testing.T) {
+	_, worktree, result := newRecoveryFixture(t)
+	rec := NewIterationRecovery(result)
+	baseHead := strings.TrimSpace(mustGit(t, worktree, "rev-parse", "HEAD"))
+
+	iter0Ref, err := rec.Capture(context.Background(), "run-123", 0)
+	if err != nil {
+		t.Fatalf("Capture iter0 returned error: %v", err)
+	}
+
+	// The rejected pass edits a file and commits it in the worktree.
+	if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, worktree, "commit", "-am", "pass commit")
+	iter1Ref, err := rec.Capture(context.Background(), "run-123", 1)
+	if err != nil {
+		t.Fatalf("Capture iter1 returned error: %v", err)
+	}
+
+	if err := rec.Restore(context.Background(), iter1Ref, iter0Ref); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+
+	head := strings.TrimSpace(mustGit(t, worktree, "rev-parse", "HEAD"))
+	if head != baseHead {
+		t.Fatalf("HEAD after Restore = %s, want capture-time HEAD %s", head, baseHead)
+	}
+	if got := readFileString(t, filepath.Join(worktree, "tracked.txt")); got != "tracked base\n" {
+		t.Fatalf("tracked.txt = %q, want tracked base", got)
+	}
+}
+
+func TestRecoveryRestoreRemovesNestedRepository(t *testing.T) {
+	_, worktree, result := newRecoveryFixture(t)
+	rec := NewIterationRecovery(result)
+
+	iter0Ref, err := rec.Capture(context.Background(), "run-123", 0)
+	if err != nil {
+		t.Fatalf("Capture iter0 returned error: %v", err)
+	}
+
+	// The rejected pass creates a nested git repository.
+	dep := filepath.Join(worktree, "vendor", "dep")
+	if err := os.MkdirAll(dep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, dep, "init", "-b", "main")
+	mustGit(t, dep, "config", "user.name", "splice-test")
+	mustGit(t, dep, "config", "user.email", "splice-test@local")
+	if err := os.WriteFile(filepath.Join(dep, "dep.txt"), []byte("dep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, dep, "add", "-A")
+	mustGit(t, dep, "commit", "-m", "dep commit")
+
+	iter1Ref, err := rec.Capture(context.Background(), "run-123", 1)
+	if err != nil {
+		t.Fatalf("Capture iter1 returned error: %v", err)
+	}
+
+	if err := rec.Restore(context.Background(), iter1Ref, iter0Ref); err != nil {
+		t.Fatalf("Restore returned error: %v", err)
+	}
+	if _, err := os.Stat(dep); !os.IsNotExist(err) {
+		t.Fatalf("vendor/dep should have been removed: %v", err)
+	}
+}
+
+// addManagedRecoveryWorktree adds a detached worktree in the managed directory
+// that Prune scans, and returns its recovery result.
+func addManagedRecoveryWorktree(t *testing.T, root, baseDir, name string) Result {
+	t.Helper()
+	repoDir := filepath.Join(baseDir, "splice-worktree-"+repoKey(root))
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(repoDir, name)
+	mustGit(t, root, "worktree", "add", "--detach", path, "HEAD")
+	mustGit(t, path, "config", "user.name", "splice-test")
+	mustGit(t, path, "config", "user.email", "splice-test@local")
+	return Result{Name: name, Path: path, RepoRoot: root}
+}
+
+func TestPruneDeletesRecoveryRefsOfRemovedWorktree(t *testing.T) {
+	root, _, _ := newRecoveryFixture(t)
+	root = resolvedPath(t, root)
+	baseDir := resolvedPath(t, t.TempDir())
+	result := addManagedRecoveryWorktree(t, root, baseDir, "gone-task")
+	if _, err := NewIterationRecovery(result).Capture(context.Background(), "run-1", 0); err != nil {
+		t.Fatalf("Capture returned error: %v", err)
+	}
+
+	pruned, err := Prune(context.Background(), PruneOptions{Cwd: root, BaseDir: baseDir})
+	if err != nil {
+		t.Fatalf("Prune returned error: %v", err)
+	}
+	if len(pruned.Removed) != 1 {
+		t.Fatalf("Prune removed %v, want the clean worktree", pruned.Removed)
+	}
+	if refs := strings.TrimSpace(mustGit(t, root, "for-each-ref", "refs/splice/recovery/")); refs != "" {
+		t.Fatalf("recovery refs survived Prune of their worktree:\n%s", refs)
+	}
+}
+
+func TestPruneKeepsRecoveryRefsOfPresentWorktree(t *testing.T) {
+	root, _, _ := newRecoveryFixture(t)
+	root = resolvedPath(t, root)
+	baseDir := resolvedPath(t, t.TempDir())
+	result := addManagedRecoveryWorktree(t, root, baseDir, "kept-task")
+	ref, err := NewIterationRecovery(result).Capture(context.Background(), "run-1", 0)
+	if err != nil {
+		t.Fatalf("Capture returned error: %v", err)
+	}
+	// An uncommitted file makes Prune skip the worktree.
+	if err := os.WriteFile(filepath.Join(result.Path, "dirty.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pruned, err := Prune(context.Background(), PruneOptions{Cwd: root, BaseDir: baseDir})
+	if err != nil {
+		t.Fatalf("Prune returned error: %v", err)
+	}
+	if len(pruned.Removed) != 0 || len(pruned.Skipped) != 1 {
+		t.Fatalf("Prune result = %+v, want the dirty worktree skipped", pruned)
+	}
+	mustGit(t, root, "rev-parse", "--verify", ref)
+}
+
+// A prune in one base directory must not touch a live worktree that sits in
+// another base directory, and its recovery refs must still restore.
+func TestPruneKeepsRecoveryRefsOfWorktreeInOtherBaseDir(t *testing.T) {
+	root, _, _ := newRecoveryFixture(t)
+	root = resolvedPath(t, root)
+	baseX := resolvedPath(t, t.TempDir())
+	baseY := resolvedPath(t, t.TempDir())
+
+	live := addManagedRecoveryWorktree(t, root, baseX, "live-custom")
+	rec := NewIterationRecovery(live)
+	if err := os.WriteFile(filepath.Join(live.Path, "tracked.txt"), []byte("iter0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref0, err := rec.Capture(context.Background(), "run-1", 0)
+	if err != nil {
+		t.Fatalf("Capture 0 returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(live.Path, "tracked.txt"), []byte("iter1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref1, err := rec.Capture(context.Background(), "run-1", 1)
+	if err != nil {
+		t.Fatalf("Capture 1 returned error: %v", err)
+	}
+
+	// Two Prepare calls in base Y: the second prunes the first.
+	first, err := Prepare(context.Background(), Options{Cwd: root, Name: "prep-1", BaseDir: baseY})
+	if err != nil {
+		t.Fatalf("Prepare prep-1 returned error: %v", err)
+	}
+	// Prepare leaves its worktree locked while in use. Release it so the
+	// next Prepare can prune it.
+	if err := Unlock(context.Background(), UnlockOptions{RepoRoot: root, Path: first.Path}); err != nil {
+		t.Fatalf("Unlock prep-1 returned error: %v", err)
+	}
+	second, err := Prepare(context.Background(), Options{Cwd: root, Name: "prep-2", BaseDir: baseY})
+	if err != nil {
+		t.Fatalf("Prepare prep-2 returned error: %v", err)
+	}
+	if second.Prune == nil || len(second.Prune.Removed) != 1 {
+		t.Fatalf("second Prepare prune = %+v, want prep-1 removed", second.Prune)
+	}
+
+	mustGit(t, root, "rev-parse", "--verify", ref0)
+	mustGit(t, root, "rev-parse", "--verify", ref1)
+	if err := rec.Restore(context.Background(), ref1, ref0); err != nil {
+		t.Fatalf("Restore after prune in another base dir returned error: %v", err)
+	}
+	if got := readFileString(t, filepath.Join(live.Path, "tracked.txt")); got != "iter0\n" {
+		t.Fatalf("tracked.txt = %q, want iter0", got)
+	}
+}
+
+// A same-name worktree that is live in one base directory keeps its refs
+// when the same-name worktree in another base directory is pruned.
+func TestPruneKeepsRecoveryRefsOfSameNameInOtherBaseDir(t *testing.T) {
+	root, _, _ := newRecoveryFixture(t)
+	root = resolvedPath(t, root)
+	baseX := resolvedPath(t, t.TempDir())
+	baseY := resolvedPath(t, t.TempDir())
+
+	pruneMe := addManagedRecoveryWorktree(t, root, baseX, "dup")
+	if _, err := NewIterationRecovery(pruneMe).Capture(context.Background(), "run-x", 0); err != nil {
+		t.Fatalf("Capture in base X returned error: %v", err)
+	}
+	keep := addManagedRecoveryWorktree(t, root, baseY, "dup")
+	refY, err := NewIterationRecovery(keep).Capture(context.Background(), "run-y", 0)
+	if err != nil {
+		t.Fatalf("Capture in base Y returned error: %v", err)
+	}
+
+	pruned, err := Prune(context.Background(), PruneOptions{Cwd: root, BaseDir: baseX})
+	if err != nil {
+		t.Fatalf("Prune returned error: %v", err)
+	}
+	if len(pruned.Removed) != 1 {
+		t.Fatalf("Prune removed %v, want the base X worktree", pruned.Removed)
+	}
+	mustGit(t, root, "rev-parse", "--verify", refY)
+}
+
+// A failure after the target is reset must still leave HEAD off the snapshot,
+// so a later MergeBack cannot merge it.
+func TestRecoveryRestoreFailureAfterResetLeavesHeadOnParent(t *testing.T) {
+	root, worktree, result := newRecoveryFixture(t)
+	baseHead := strings.TrimSpace(mustGit(t, worktree, "rev-parse", "HEAD"))
+	ctx := context.Background()
+	rec := NewIterationRecovery(result)
+
+	if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("iter0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	iter0Ref, err := rec.Capture(ctx, "run-123", 0)
+	if err != nil {
+		t.Fatalf("Capture iter0 returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "tracked.txt"), []byte("iter1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	iter1Ref, err := rec.Capture(ctx, "run-123", 1)
+	if err != nil {
+		t.Fatalf("Capture iter1 returned error: %v", err)
+	}
+
+	// Fail the first reset --mixed only, so the cleanup attempt can succeed.
+	injected := false
+	runGit := func(ctx context.Context, dir string, args ...string) (CommandResult, error) {
+		if !injected && len(args) >= 2 && args[0] == "reset" && args[1] == "--mixed" {
+			injected = true
+			return CommandResult{ExitCode: 1, Stderr: "injected failure"}, nil
+		}
+		return defaultRunGit(ctx, dir, args...)
+	}
+	failing := newIterationRecovery(result, runGit, nil)
+	if err := failing.Restore(ctx, iter1Ref, iter0Ref); err == nil {
+		t.Fatal("Restore returned nil error despite the injected reset failure")
+	}
+
+	if head := strings.TrimSpace(mustGit(t, worktree, "rev-parse", "HEAD")); head != baseHead {
+		t.Fatalf("HEAD after failed Restore = %s, want snapshot parent %s", head, baseHead)
+	}
+	mergeResult, err := MergeBack(ctx, MergeBackOptions{RepoRoot: root, WorktreePath: worktree, Name: result.Name})
+	if err != nil {
+		t.Fatalf("MergeBack returned error: %v", err)
+	}
+	if mergeResult.Status != MergeBackMerged {
+		t.Fatalf("MergeBack status = %q, want merged (%s)", mergeResult.Status, mergeResult.Message)
+	}
+	log := mustGit(t, root, "log", "--format=%ae %s")
+	if strings.Contains(log, "recovery@local") || strings.Contains(log, "splice recovery snapshot") {
+		t.Fatalf("source history contains recovery snapshot:\n%s", log)
+	}
+}
+
 func TestRecoveryGitHardensEnv(t *testing.T) {
 	record := gitenvtest.InstallRecorder(t)
 	_, _ = defaultEnvRunGit(context.Background(), t.TempDir(), nil, "rev-parse", "HEAD")
@@ -1398,5 +1754,173 @@ func assertSourceRefusalLeftWorktreeUntouched(t *testing.T, root, worktree, bran
 	}
 	if status := mustGit(t, worktree, "status", "--porcelain", "--untracked-files=all"); !strings.Contains(status, "feature.txt") {
 		t.Fatalf("worktree status = %q, want feature.txt still uncommitted", status)
+	}
+}
+
+// initCheckoutRepo makes a git repo with one committed file and returns its
+// root and the commit. The commit is the content the checkout must show.
+func initCheckoutRepo(t *testing.T) (string, string) {
+	t.Helper()
+	root := resolvedPath(t, t.TempDir())
+	gitInRepo(t, root, "init", "-q")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "f.txt"), []byte("committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInRepo(t, root, "add", "-A")
+	gitInRepo(t, root, "commit", "-qm", "base")
+	return root, strings.TrimSpace(gitInRepo(t, root, "rev-parse", "HEAD"))
+}
+
+func gitInRepo(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return string(out)
+}
+
+// The checkout shows the commit, not the dirty worktree. The path maps a
+// subdirectory of the repo to the same subdirectory of the checkout. Cleanup
+// removes the directory and unregisters the worktree.
+func TestCheckoutAtShowsCommitAndCleansUp(t *testing.T) {
+	root, commit := initCheckoutRepo(t)
+	if err := os.WriteFile(filepath.Join(root, "sub", "f.txt"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := gitInRepo(t, root, "worktree", "list", "--porcelain")
+
+	checkout, cleanup, err := CheckoutAt(context.Background(), filepath.Join(root, "sub"), commit)
+	if err != nil {
+		t.Fatalf("CheckoutAt: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(checkout, "f.txt"))
+	if err != nil {
+		t.Fatalf("read checkout file: %v", err)
+	}
+	if string(got) != "committed\n" {
+		t.Fatalf("checkout file = %q, want the committed content", got)
+	}
+	if filepath.Base(checkout) != "sub" {
+		t.Fatalf("checkout path = %q, want the sub directory of the checkout", checkout)
+	}
+	cleanup()
+	if _, err := os.Stat(checkout); !os.IsNotExist(err) {
+		t.Fatalf("checkout dir still exists after cleanup: %v", err)
+	}
+	if after := gitInRepo(t, root, "worktree", "list", "--porcelain"); after != before {
+		t.Fatalf("worktree list changed after cleanup:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// A cancelled context leaves no checkout and no worktree registration.
+func TestCheckoutAtCancelledLeavesNothing(t *testing.T) {
+	root, commit := initCheckoutRepo(t)
+	before := gitInRepo(t, root, "worktree", "list", "--porcelain")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, cleanup, err := CheckoutAt(ctx, root, commit); err == nil {
+		cleanup()
+		t.Fatal("CheckoutAt with a cancelled context must fail")
+	}
+	if after := gitInRepo(t, root, "worktree", "list", "--porcelain"); after != before {
+		t.Fatalf("worktree list changed after a failed checkout:\n%s", after)
+	}
+}
+
+// A user worktree whose directory went missing keeps its registration when a
+// checkout is removed normally. Cleanup prunes only when its own removal fails.
+func TestCheckoutCleanupKeepsUnrelatedMissingWorktree(t *testing.T) {
+	root, commit := initCheckoutRepo(t)
+	userWT := filepath.Join(resolvedPath(t, t.TempDir()), "user-wt")
+	gitInRepo(t, root, "worktree", "add", "--detach", userWT, commit)
+	if err := os.RemoveAll(userWT); err != nil {
+		t.Fatal(err)
+	}
+	_, cleanup, err := CheckoutAt(context.Background(), root, commit)
+	if err != nil {
+		t.Fatalf("CheckoutAt: %v", err)
+	}
+	cleanup()
+	if list := gitInRepo(t, root, "worktree", "list", "--porcelain"); !strings.Contains(list, userWT) {
+		t.Fatalf("the user's missing worktree registration was pruned:\n%s", list)
+	}
+}
+
+// A checkout whose run crashed before cleanup stays registered. A later sweep
+// removes the stale checkout and its registration, and keeps a fresh one.
+func TestPruneStaleCheckoutsRecoversCrashedRun(t *testing.T) {
+	t.Setenv("TMPDIR", resolvedPath(t, t.TempDir()))
+	root, commit := initCheckoutRepo(t)
+
+	// The crash: CheckoutAt ran, and its cleanup never did.
+	crashed, _, err := CheckoutAt(context.Background(), root, commit)
+	if err != nil {
+		t.Fatalf("CheckoutAt: %v", err)
+	}
+	fresh, freshCleanup, err := CheckoutAt(context.Background(), root, commit)
+	if err != nil {
+		t.Fatalf("CheckoutAt fresh: %v", err)
+	}
+	defer freshCleanup()
+
+	home := CheckoutHome(root)
+	crashedRoot := checkoutChild(t, home, crashed)
+	freshRoot := checkoutChild(t, home, fresh)
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(crashedRoot, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := PruneStaleCheckouts(context.Background(), root, time.Hour)
+	if err != nil {
+		t.Fatalf("PruneStaleCheckouts: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned %d checkouts, want 1", n)
+	}
+	if _, err := os.Stat(crashedRoot); !os.IsNotExist(err) {
+		t.Fatalf("crashed checkout still exists: %v", err)
+	}
+	if _, err := os.Stat(freshRoot); err != nil {
+		t.Fatalf("fresh checkout was removed: %v", err)
+	}
+	if list := gitInRepo(t, root, "worktree", "list", "--porcelain"); strings.Contains(list, crashedRoot) {
+		t.Fatalf("crashed checkout is still registered:\n%s", list)
+	}
+}
+
+// checkoutChild returns the managed child directory of home that holds path.
+func checkoutChild(t *testing.T, home, path string) string {
+	t.Helper()
+	rel, err := filepath.Rel(home, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(home, strings.Split(rel, string(filepath.Separator))[0])
+}
+
+// Cleanup removes a registration that a cancelled "worktree add" left locked
+// with its directory gone. The unlock and prune are what remove it.
+func TestRemoveCheckoutDropsLockedHalfCreatedRegistration(t *testing.T) {
+	root, commit := initCheckoutRepo(t)
+	checkout := filepath.Join(resolvedPath(t, t.TempDir()), "half-made")
+	gitInRepo(t, root, "worktree", "add", "--detach", "--lock", "--reason", "initializing", checkout, commit)
+	// Without its .git file git refuses to remove the worktree, as it does
+	// for a checkout cancelled during "worktree add".
+	if err := os.Remove(filepath.Join(checkout, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	removeCheckout(root, checkout)
+	if list := gitInRepo(t, root, "worktree", "list", "--porcelain"); strings.Contains(list, "half-made") {
+		t.Fatalf("locked registration survived cleanup:\n%s", list)
 	}
 }

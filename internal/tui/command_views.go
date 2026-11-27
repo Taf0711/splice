@@ -370,6 +370,8 @@ func (m model) usePipeline(name string) (card, text string, err error) {
 			Sections: []commandCardSection{{Title: "Error", Lines: []string{err.Error()}}},
 		}), "", err
 	}
+	// The open pipeline viewer shows the new active pipeline at once.
+	m.surface.configurePipeline(m.cwd, m.trusted, stageModelConfigPath(m.userConfigPath))
 	hints := []string{"applies from the next run; /pipeline shows the active topology"}
 	text = "Active pipeline: " + topology.Name + ". It applies from the next run."
 	// A trusted project file outranks the library entry, so the selection does

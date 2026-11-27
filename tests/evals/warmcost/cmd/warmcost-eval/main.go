@@ -57,40 +57,48 @@ type options struct {
 	keepWorkspaces    bool
 	noCommitWrites    bool
 	noMemoryPrefetch  bool
+	trustProject      bool
 	armEnv            stringList
 	runID             string
 }
 
 func main() {
 	opts := options{}
-	flag.StringVar(&opts.repo, "repo", ".", "repository root used for the binary revision")
-	flag.StringVar(&opts.binary, "binary", "", "path to the splice binary (required)")
-	flag.StringVar(&opts.model, "model", "", "model id for every attempt")
-	flag.StringVar(&opts.reasoningEffort, "reasoning-effort", "", "recorded reasoning effort setting")
-	flag.StringVar(&opts.maxTurns, "max-turns", "", "recorded max turns setting")
-	flag.StringVar(&opts.tasks, "tasks", "", "taskset directory (required)")
-	flag.StringVar(&opts.out, "out", "tests/evals/results", "output directory for the run artifacts")
-	flag.IntVar(&opts.repeats, "repeats", 1, "repeats per task per arm")
-	flag.StringVar(&opts.arms, "arms", "cold,warm", "comma-separated arms: cold,warm,warm-retrieval-only")
-	flag.DurationVar(&opts.timeout, "timeout", 30*time.Minute, "per-attempt timeout")
-	flag.IntVar(&opts.bootstrapSamples, "bootstrap-samples", 10000, "task-clustered bootstrap samples")
-	flag.Int64Var(&opts.bootstrapSeed, "bootstrap-seed", 1, "bootstrap seed")
-	flag.Float64Var(&opts.correctnessMargin, "correctness-margin", 0, "pre-registered acceptable success-rate drop")
-	flag.StringVar(&opts.binaryRevision, "binary-revision", "", "revision of the binary under test; overrides the --repo derivation when set")
-	flag.StringVar(&opts.sidecarRevision, "sidecar-revision", "", "sidecar binary revision recorded per attempt")
-	flag.StringVar(&opts.retention, "retention", "fresh", "sidecar lifetime protocol: fresh or shared")
-	flag.StringVar(&opts.sidecarRoot, "sidecar-root", "", "directory for per-class sidecar sockets and databases (required for shared retention)")
-	flag.BoolVar(&opts.keepWorkspaces, "keep-workspaces", false, "keep per-attempt workspaces for debugging")
-	flag.Var(&opts.armEnv, "arm-env", "KEY=VALUE switch that replaces the same key in every arm that sets it (repeatable)")
-	flag.BoolVar(&opts.noMemoryPrefetch, "no-memory-prefetch", false, "turn memory prefetch off in every arm (the prefetch ablation)")
-	flag.BoolVar(&opts.noCommitWrites, "no-commit-writes", false, "do not commit and reanchor a verified write; the read runs on its uncommitted changes")
-	flag.StringVar(&opts.runID, "run-id", "", "run id (default: timestamp)")
+	bindFlags(flag.CommandLine, &opts)
 	flag.Parse()
 
 	if err := run(opts); err != nil {
 		fmt.Fprintln(os.Stderr, "warmcost-eval:", err)
 		os.Exit(1)
 	}
+}
+
+// bindFlags registers every warmcost-eval flag on fs, so a test can parse
+// flags without touching the global flag set.
+func bindFlags(fs *flag.FlagSet, opts *options) {
+	fs.StringVar(&opts.repo, "repo", ".", "repository root used for the binary revision")
+	fs.StringVar(&opts.binary, "binary", "", "path to the splice binary (required)")
+	fs.StringVar(&opts.model, "model", "", "model id for every attempt")
+	fs.StringVar(&opts.reasoningEffort, "reasoning-effort", "", "recorded reasoning effort setting")
+	fs.StringVar(&opts.maxTurns, "max-turns", "", "recorded max turns setting")
+	fs.StringVar(&opts.tasks, "tasks", "", "taskset directory (required)")
+	fs.StringVar(&opts.out, "out", "tests/evals/results", "output directory for the run artifacts")
+	fs.IntVar(&opts.repeats, "repeats", 1, "repeats per task per arm")
+	fs.StringVar(&opts.arms, "arms", "cold,warm", "comma-separated arms: cold,warm,warm-retrieval-only")
+	fs.DurationVar(&opts.timeout, "timeout", 30*time.Minute, "per-attempt timeout")
+	fs.IntVar(&opts.bootstrapSamples, "bootstrap-samples", 10000, "task-clustered bootstrap samples")
+	fs.Int64Var(&opts.bootstrapSeed, "bootstrap-seed", 1, "bootstrap seed")
+	fs.Float64Var(&opts.correctnessMargin, "correctness-margin", 0, "pre-registered acceptable success-rate drop")
+	fs.StringVar(&opts.binaryRevision, "binary-revision", "", "revision of the binary under test; overrides the --repo derivation when set")
+	fs.StringVar(&opts.sidecarRevision, "sidecar-revision", "", "sidecar binary revision recorded per attempt")
+	fs.StringVar(&opts.retention, "retention", "fresh", "sidecar lifetime protocol: fresh or shared")
+	fs.StringVar(&opts.sidecarRoot, "sidecar-root", "", "directory for per-class sidecar sockets and databases (required for shared retention)")
+	fs.BoolVar(&opts.keepWorkspaces, "keep-workspaces", false, "keep per-attempt workspaces for debugging")
+	fs.Var(&opts.armEnv, "arm-env", "KEY=VALUE switch that replaces the same key in every arm that sets it (repeatable)")
+	fs.BoolVar(&opts.noMemoryPrefetch, "no-memory-prefetch", false, "turn memory prefetch off in every arm (the prefetch ablation)")
+	fs.BoolVar(&opts.noCommitWrites, "no-commit-writes", false, "do not commit and reanchor a verified write; the read runs on its uncommitted changes")
+	fs.BoolVar(&opts.trustProject, "trust-project", false, "trust each attempt workspace through SPLICE_TRUST_WORKSPACE=1 so its .splice/config.json loads (for example verify.testCommand); default leaves the trust variable unset")
+	fs.StringVar(&opts.runID, "run-id", "", "run id (default: timestamp)")
 }
 
 func run(opts options) error {
@@ -134,6 +142,7 @@ func run(opts options) error {
 		NoCommitWrites:    opts.noCommitWrites,
 		NoMemoryPrefetch:  opts.noMemoryPrefetch,
 		ArmEnvOverrides:   opts.armEnv,
+		TrustProject:      opts.trustProject,
 	}
 	runner, err := warmcost.NewRunner(cfg, nil)
 	if err != nil {

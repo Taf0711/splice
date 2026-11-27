@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,6 +28,11 @@ type DispatchInput struct {
 	// Payload is serialized to JSON and written to each hook command's stdin so a
 	// hook can inspect the tool call, its result, or session context.
 	Payload any
+	// Sandbox is the caller's agent sandbox engine. Plugin hooks run under it
+	// outside a pipeline run. Nil (or an engine that does not enforce) makes
+	// a plugin hook refuse to run unless the user opted the plugin into host
+	// execution.
+	Sandbox *sandbox.Engine
 }
 
 // DispatchOutcome reports what happened for one Dispatch call.
@@ -47,6 +53,9 @@ type commandResult struct {
 	Stderr   string
 	Err      error // set when the command could not be executed (not a non-splice exit)
 	TimedOut bool  // the hook started but its deadline/cancellation fired before it returned
+	// Refused is set when the hook had to run sandboxed and no enforcing
+	// sandbox was available. The command never started.
+	Refused bool
 }
 
 // commandRunner executes one hook command. It is injectable so the dispatch
@@ -76,6 +85,9 @@ type Dispatcher struct {
 	timeout time.Duration
 	now     func() time.Time
 	run     commandRunner
+	// pipelineEngine is the stage engine of a pipeline run (ForPipeline).
+	// When set, every hook without runOnHost runs under it.
+	pipelineEngine *sandbox.Engine
 }
 
 // NewDispatcher builds a Dispatcher. A splice/empty config yields a dispatcher that
@@ -89,10 +101,6 @@ func NewDispatcher(options DispatcherOptions) *Dispatcher {
 	if now == nil {
 		now = time.Now
 	}
-	run := options.run
-	if run == nil {
-		run = execCommandRunner
-	}
 	return &Dispatcher{
 		config:  options.Config,
 		audit:   options.Audit,
@@ -100,8 +108,84 @@ func NewDispatcher(options DispatcherOptions) *Dispatcher {
 		env:     options.Env,
 		timeout: timeout,
 		now:     now,
-		run:     run,
+		run:     options.run,
 	}
+}
+
+// ForPipeline returns a copy of the dispatcher for one pipeline run. The copy
+// runs every hook under engine (the run's stage engine) with cwd as the
+// working directory, except a hook marked runOnHost. A nil dispatcher stays
+// nil. The copy shares the config and audit store.
+func (dispatcher *Dispatcher) ForPipeline(engine *sandbox.Engine, cwd string) *Dispatcher {
+	if dispatcher == nil {
+		return nil
+	}
+	bound := *dispatcher
+	bound.pipelineEngine = engine
+	if strings.TrimSpace(cwd) != "" {
+		bound.cwd = cwd
+	}
+	return &bound
+}
+
+// Execution values recorded in the hook audit log.
+const (
+	ExecutionSandboxed = "sandboxed"
+	ExecutionHost      = "host"
+	ExecutionRefused   = "refused"
+)
+
+// hookPlacement is where one hook runs: under engine (sandboxed) or on the
+// host. A sandboxed placement with a non-empty gap cannot run.
+type hookPlacement struct {
+	sandboxed bool
+	engine    *sandbox.Engine
+	gap       string
+}
+
+func (placement hookPlacement) execution() string {
+	switch {
+	case !placement.sandboxed:
+		return ExecutionHost
+	case placement.gap != "":
+		return ExecutionRefused
+	default:
+		return ExecutionSandboxed
+	}
+}
+
+// placeHook decides where a hook runs. A runOnHost hook runs on the host. In
+// a pipeline run every other hook runs under the stage engine. Outside a
+// pipeline run a plugin hook (third-party code) runs under the caller's agent
+// engine and a user hook runs on the host.
+func (dispatcher *Dispatcher) placeHook(hook Definition, input DispatchInput) hookPlacement {
+	var engine *sandbox.Engine
+	switch {
+	case hook.RunOnHost:
+		return hookPlacement{}
+	case dispatcher.pipelineEngine != nil:
+		engine = dispatcher.pipelineEngine
+	case hook.PluginID != "":
+		engine = input.Sandbox
+	default:
+		return hookPlacement{}
+	}
+	gap := engine.EnforcementGap()
+	if hook.PluginDir != "" {
+		// A user plugin lives under the Splice config directory, which the
+		// default policy denies. The hook may read its own plugin directory
+		// only. A user hook gets no such carve-out.
+		engine = engine.WithReadableDir(hook.PluginDir)
+	}
+	return hookPlacement{sandboxed: true, engine: engine, gap: gap}
+}
+
+// hostOptInHint names the config key that lets this hook run on the host.
+func hostOptInHint(hook Definition) string {
+	if hook.PluginID != "" {
+		return fmt.Sprintf("hook %q of plugin %q runs only inside the sandbox. To run it on the host, set plugins.%s.hostExecution to true in the user config.json.", hook.ID, hook.PluginID, hook.PluginID)
+	}
+	return fmt.Sprintf("hook %q runs inside the sandbox in a pipeline run. To run it on the host, set \"runOnHost\": true on it in the user hooks.json.", hook.ID)
 }
 
 // blocksOn reports whether a non-splice exit for this event should veto the action.
@@ -140,17 +224,31 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 
 	for _, hook := range selected {
 		command := Command{Command: hook.Command, Args: hook.Args}
-		dispatcher.recordStarted(hook, input, command)
+		placement := dispatcher.placeHook(hook, input)
+		dispatcher.recordStarted(hook, input, command, placement.execution())
 
 		started := dispatcher.now()
-		result := dispatcher.runWithTimeout(ctx, hook, payload)
+		result := dispatcher.runPlaced(ctx, hook, placement, payload)
 		durationMs := int(dispatcher.now().Sub(started) / time.Millisecond)
 		outcome.Ran++
 
 		status, blocked := classifyResult(input.Event, result)
-		dispatcher.recordCompleted(hook, input, status, result, durationMs)
+		if placement.sandboxed && (status != AuditCompleted || result.Refused) {
+			// Fail loudly: a sandboxed hook that failed may have hit the
+			// sandbox, so the record and the notice name the hook and the
+			// key that allows host execution.
+			result.Stderr = strings.TrimSpace(strings.TrimSpace(result.Stderr) + "\n[splice] " + hostOptInHint(hook))
+		}
+		execution := placement.execution()
+		if result.Refused {
+			execution = ExecutionRefused
+		}
+		dispatcher.recordCompleted(hook, input, status, result, durationMs, execution)
 
 		if message := hookMessage(result); message != "" {
+			if placement.sandboxed && status != AuditCompleted && strings.TrimSpace(result.Stdout) != "" {
+				message += "\n" + strings.TrimSpace(result.Stderr)
+			}
 			outcome.Messages = append(outcome.Messages, message)
 		}
 
@@ -165,14 +263,39 @@ func (dispatcher *Dispatcher) Dispatch(ctx context.Context, input DispatchInput)
 	return outcome
 }
 
-func (dispatcher *Dispatcher) runWithTimeout(ctx context.Context, hook Definition, stdin []byte) commandResult {
+func (dispatcher *Dispatcher) runPlaced(ctx context.Context, hook Definition, placement hookPlacement, stdin []byte) commandResult {
+	if placement.sandboxed && placement.gap != "" {
+		// Never fall back to the host: the hook does not start.
+		procrun.ReportRefused(ctx, procrun.ProfileHooksDispatch, hook.Command, placement.engine, procrun.RefusalNoNativeSandbox, placement.gap)
+		return commandResult{
+			ExitCode: -1,
+			Refused:  true,
+			Err:      fmt.Errorf("hook %q must run sandboxed, but %s", hook.ID, placement.gap),
+			Stderr:   fmt.Sprintf("hook %q was not run: it must run inside the sandbox, but %s.", hook.ID, placement.gap),
+		}
+	}
 	runCtx, cancel := context.WithTimeout(ctx, dispatcher.timeout)
 	defer cancel()
 	env := secrets.ScrubChildEnv(os.Environ())
 	if len(dispatcher.env) > 0 {
 		env = append(env, dispatcher.env...)
 	}
-	result := dispatcher.run(runCtx, hook.Command, hook.Args, stdin, dispatcher.cwd, env)
+	if hook.PluginDir != "" {
+		// The plugin root contract: a plugin hook resolves its own files
+		// through AGENT_PLUGIN_ROOT, like a plugin tool command.
+		env = append(env, "AGENT_PLUGIN_ROOT="+hook.PluginDir)
+	}
+	run := dispatcher.run
+	if run == nil {
+		engine := placement.engine
+		if !placement.sandboxed {
+			engine = nil
+		}
+		run = func(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
+			return runHookCommand(ctx, engine, command, args, stdin, cwd, env)
+		}
+	}
+	result := run(runCtx, hook.Command, hook.Args, stdin, dispatcher.cwd, env)
 	// A deadline or cancellation that fired while the hook was running is distinct
 	// from a launch failure: the hook DID start, we just never got its verdict.
 	// classifyResult must fail CLOSED on this for a blocking event — a hung policy
@@ -188,6 +311,14 @@ func (dispatcher *Dispatcher) runWithTimeout(ctx context.Context, hook Definitio
 // command that could not be executed at all is an error but never blocks (a
 // missing hook binary must not wedge every tool call).
 func classifyResult(event Event, result commandResult) (AuditStatus, bool) {
+	// A hook that had to run sandboxed but could not never gave a verdict.
+	// Like a timeout, a blocking event fails CLOSED.
+	if result.Refused {
+		if blocksOn(event) {
+			return AuditBlocked, true
+		}
+		return AuditError, false
+	}
 	// A hook that started but was killed by its deadline (or a cancellation) never
 	// returned a verdict. For a blocking event we must fail CLOSED and veto: a
 	// hung beforeTool policy hook cannot be treated as approval. (A launch failure
@@ -234,7 +365,7 @@ func blockReason(result commandResult) string {
 	return "hook exited non-splice"
 }
 
-func (dispatcher *Dispatcher) recordStarted(hook Definition, input DispatchInput, command Command) {
+func (dispatcher *Dispatcher) recordStarted(hook Definition, input DispatchInput, command Command, execution string) {
 	if dispatcher.audit == nil {
 		return
 	}
@@ -244,10 +375,12 @@ func (dispatcher *Dispatcher) recordStarted(hook Definition, input DispatchInput
 		Matcher:    hook.Matcher,
 		ToolCallID: input.ToolCallID,
 		Commands:   []AuditCommand{command},
+		Execution:  execution,
+		PluginID:   hook.PluginID,
 	})
 }
 
-func (dispatcher *Dispatcher) recordCompleted(hook Definition, input DispatchInput, status AuditStatus, result commandResult, durationMs int) {
+func (dispatcher *Dispatcher) recordCompleted(hook Definition, input DispatchInput, status AuditStatus, result commandResult, durationMs int, execution string) {
 	if dispatcher.audit == nil {
 		return
 	}
@@ -259,19 +392,28 @@ func (dispatcher *Dispatcher) recordCompleted(hook Definition, input DispatchInp
 		Status:     status,
 		Results:    []AuditResult{{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}},
 		DurationMs: durationMs,
+		Execution:  execution,
+		PluginID:   hook.PluginID,
 	})
 }
 
-// execCommandRunner runs a hook command directly (no shell), feeding the JSON
+// execCommandRunner runs a hook command on the host. See runHookCommand.
+func execCommandRunner(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
+	return runHookCommand(ctx, nil, command, args, stdin, cwd, env)
+}
+
+// runHookCommand runs a hook command directly (no shell), feeding the JSON
 // payload on stdin and capturing stdout/stderr. A non-splice exit is reported via
 // ExitCode (not Err); Err is reserved for commands that could not be launched.
 // The command goes through the procrun chokepoint so every hook spawn emits an
-// audit record. The engine is nil: hook commands stay unsandboxed because users
-// configure them, and the environment is the scrubbed process env plus the
-// dispatcher extras, exactly as before the runner routed through procrun.
-func execCommandRunner(ctx context.Context, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
+// audit record. A nil engine runs the command on the host; a non-nil engine
+// must wrap it, or the hook is refused. The environment is the scrubbed
+// process env plus the dispatcher extras. The process group is killed when
+// the hook times out, like the bash tool.
+func runHookCommand(ctx context.Context, engine *sandbox.Engine, command string, args []string, stdin []byte, cwd string, env []string) commandResult {
 	prepared, err := procrun.Prepare(ctx, procrun.Request{
 		ProfileID: procrun.ProfileHooksDispatch,
+		Engine:    engine,
 		Spec: sandbox.CommandSpec{
 			Name: command,
 			Args: args,
@@ -280,9 +422,17 @@ func execCommandRunner(ctx context.Context, command string, args []string, stdin
 		},
 	})
 	if err != nil {
-		// Unreachable with a nil engine and no allowlist, but a refusal must
-		// not look like a clean non-splice exit.
+		// A refusal must not look like a clean non-splice exit.
+		if engine != nil {
+			return commandResult{ExitCode: -1, Refused: true, Err: err, Stderr: "hook was not run: " + err.Error()}
+		}
 		return commandResult{ExitCode: -1, Err: err}
+	}
+	if engine != nil && !prepared.Plan.Wrapped {
+		// An inherited sandbox marker can leave the plan unwrapped. That is
+		// not confinement, so the hook does not start.
+		procrun.ReportExit(ctx, prepared.Cmd, procrun.SpawnExit{ExitCode: -1, Refused: procrun.RefusalNoNativeSandbox})
+		return commandResult{ExitCode: -1, Refused: true, Err: errors.New("the sandbox did not wrap the hook command"), Stderr: "hook was not run: the sandbox did not wrap the hook command."}
 	}
 	cmd := prepared.Cmd
 	if len(stdin) > 0 {
@@ -292,6 +442,7 @@ func execCommandRunner(ctx context.Context, command string, args []string, stdin
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err = cmd.Run()
+	procrun.ReportRun(ctx, cmd, err)
 	result := commandResult{Stdout: stdout.String(), Stderr: stderr.String()}
 	if err == nil {
 		return result

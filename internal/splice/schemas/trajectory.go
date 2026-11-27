@@ -46,6 +46,7 @@ type IterationState struct {
 	TestsPassing             int              `json:"tests_passing"`
 	TestsFailing             int              `json:"tests_failing"`
 	TestsErrored             int              `json:"tests_errored"`
+	TestsAlreadyFailing      int              `json:"tests_already_failing,omitempty"` // failed before the run; not in the counts above
 	Preexisting              TestCounts       `json:"preexisting,omitempty"`
 	Authored                 TestCounts       `json:"authored,omitempty"`
 	AcceptanceFactsPassing   int              `json:"acceptance_facts_passing"`
@@ -57,9 +58,10 @@ type IterationState struct {
 	StateHash                string           `json:"state_hash"`
 	Confidence               float64          `json:"confidence"`
 	TokensConsumed           int              `json:"tokens_consumed"`
-	// TokensGenerated is the output-side spend (completion + reasoning) for
+	// TokensGenerated is the visible output (completion minus reasoning) for
 	// the iteration. Trajectory budget gating keys on this field: input
 	// volume is bounded per call by stage-input compaction, not by abort.
+	// Reasoning tokens are excluded; the per-request output cap bounds them.
 	TokensGenerated int      `json:"tokens_generated"`
 	FilesChanged    []string `json:"files_changed,omitempty"`
 	LinesAdded      int      `json:"lines_added"`
@@ -82,7 +84,7 @@ func (i IterationState) Validate() error {
 	if err := validateConfidence(i.Confidence); err != nil {
 		return err
 	}
-	if i.TestsPassing < 0 || i.TestsFailing < 0 || i.TestsErrored < 0 {
+	if i.TestsPassing < 0 || i.TestsFailing < 0 || i.TestsErrored < 0 || i.TestsAlreadyFailing < 0 {
 		return errors.New("test counts must be non-negative")
 	}
 	if err := i.Preexisting.Validate(); err != nil {

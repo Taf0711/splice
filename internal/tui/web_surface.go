@@ -418,6 +418,7 @@ func (m model) runSecretValues() ([]string, error) {
 // shows the row.
 func (m model) openWebSurface() model {
 	m.surface.configurePipeline(m.cwd, m.trusted, stageModelConfigPath(m.userConfigPath))
+	m.surface.configureEditor(m)
 	url, err := m.surface.open(m.activeSession.SessionID)
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Web surface: " + err.Error()})
@@ -454,6 +455,12 @@ func (m model) rotateWebSession() model {
 // one-time link that opens the editor on it. The name is a library entry,
 // "default", or none for the active topology.
 func (m model) openPipelineEditor(args []string) model {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendSystem, text: "usage: /pipeline edit [--new] [name|default]"})
+			return m
+		}
+	}
 	ref, fresh, err := web.ParseEditArgs(args)
 	if err != nil {
 		m.transcript = reduceTranscript(m.transcript, transcriptAction{kind: actionAppendError, text: "Pipeline editor: " + err.Error() + ". Usage: /pipeline edit [--new] [name]"})

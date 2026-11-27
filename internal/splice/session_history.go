@@ -64,7 +64,7 @@ func MapDesignHistory(events []sessions.Event) []schemas.ConversationMessage {
 				if msg.Content != "" {
 					result = append(result, schemas.ConversationMessage{
 						Role:    msg.Role,
-						Content: msg.Content,
+						Content: withoutSandboxEvidence(msg.Content),
 					})
 				}
 			case "ask_user":

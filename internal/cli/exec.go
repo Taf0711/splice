@@ -25,6 +25,7 @@ import (
 	"github.com/Taf0711/splice/internal/providers/decisions"
 	"github.com/Taf0711/splice/internal/sandbox"
 	"github.com/Taf0711/splice/internal/sandbox/procrun"
+	"github.com/Taf0711/splice/internal/secrets"
 	"github.com/Taf0711/splice/internal/sessions"
 	"github.com/Taf0711/splice/internal/specmode"
 	splicerun "github.com/Taf0711/splice/internal/splice"
@@ -157,6 +158,15 @@ type execOptions struct {
 	// source repo inherit that trust (proven via the git common dir). Off by
 	// default; a spike, no full trust-inheritance UX yet.
 	inheritWorktreeTrust bool
+	// acceptNestedSandbox accepts a nested run for this run only: when Splice
+	// already runs inside a sandbox, stage commands, command nodes, and
+	// agent nodes run under the outer sandbox. The user config key
+	// sandbox.acceptNestedSandbox is the persistent form.
+	acceptNestedSandbox bool
+
+	// design is the --design request. The run crystallizes it, critiques the
+	// plan, and then executes it, as a --plan run does.
+	design string
 }
 
 type execUsageError struct {
@@ -519,6 +529,8 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	var streamImages []zeroruntime.ImageBlock
 	if options.planPath != "" {
 		prompt = designPlan.Epic
+	} else if options.design != "" {
+		prompt = options.design
 	} else {
 		prompt, streamImages, err = resolveExecPrompt(options, workspaceRoot, deps.stdin)
 		if err != nil {
@@ -755,6 +767,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		fmt.Fprintf(stderr, "[splice] WARNING: session not recorded: %v\n", err)
 		preparedSession = sessions.PreparedExec{}
 	}
+	// The design phase reads and writes its conversation through the session
+	// store. Without a store it cannot crystallize, so it stops here.
+	if options.design != "" && (preparedSession.Store == nil || preparedSession.Session.SessionID == "") {
+		return writeExecError(stdout, stderr, options.outputFormat, "session_error", "--design needs a session to record the design conversation, and the session could not be recorded.", exitCrash)
+	}
 	agentPrompt := sessions.FormatExecPrompt(prompt, preparedSession)
 	runID, err := streamjson.CreateRunID(time.Now())
 	if err != nil {
@@ -798,6 +815,10 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 	sessionRecorder := execSessionRecorder{prepared: preparedSession}
 	// Surface a best-effort session-recording failure once, on every exit path.
 	defer sessionRecorder.warnIfRecordingFailed(stderr)
+	if options.design != "" {
+		// The design history starts after this marker, as in the TUI design mode.
+		sessionRecorder.append(sessions.EventDesignModeEntered, nil)
+	}
 	sessionRecorder.append(sessions.EventMessage, map[string]any{
 		"role":    "user",
 		"content": prompt,
@@ -961,8 +982,9 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		// if the model keeps stalling. The interactive TUI leaves this off.
 		RequireCompletionSignal: true,
 		Sandbox:                 sandboxEngine,
+		AcceptNestedSandbox:     resolved.Sandbox.AcceptNestedSandbox || options.acceptNestedSandbox,
 		FileTracker:             tools.NewFileTracker(),
-		Hooks:                   newHookDispatcherWithExtra(workspaceRoot, !trusted, pluginActivation.hooks),
+		Hooks:                   newHookDispatcherWithExtra(workspaceRoot, !trusted, pluginActivation.hooks, stderr),
 		EnabledTools:            options.enabledTools,
 		DisabledTools:           options.disabledTools,
 		OnText:                  writer.text,
@@ -975,11 +997,17 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		OnPresentationState:     surface.presentation(writer.presentationState),
 		OnToolCall: func(call agent.ToolCall) {
 			writer.toolCall(call, registry)
-			sessionRecorder.append(sessions.EventToolCall, map[string]any{
+			payload := map[string]any{
 				"id":        call.ID,
 				"name":      call.Name,
 				"arguments": call.Arguments,
-			})
+			}
+			// Record the pipeline stage that made the call, when one runs.
+			if stage, iteration, ok := writer.runningStage(); ok {
+				payload["stage"] = stage
+				payload["iteration"] = iteration
+			}
+			sessionRecorder.append(sessions.EventToolCall, payload)
 			// Snapshot before-state of files this call will mutate (safe rewind).
 			if checkpoint, ok := sessionRecorder.captureCheckpoint(workspaceRoot, call); ok {
 				writer.checkpoint(checkpoint)
@@ -1013,9 +1041,11 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		OnAttributedUsage: func(au agent.AttributedUsage) {
 			// A request that carries no cost is priced from its serving provider's
 			// catalog before it is saved, so the stored event shows the cost the run
-			// used. A request with a usage error keeps its error.
+			// used. A request with a usage error keeps its error. The provider's
+			// reported charge, when present, wins even for a model the registry
+			// does not list (same rule as the ledger path).
 			if au.Cost.Status == "" && au.UsageError == "" {
-				au.Cost = servedCatalogs.Estimate(au.ProviderName, au.Model, au.Usage, au.UsageReported)
+				au.Cost = splicerun.ResolveRequestCostFor(nil, servedCatalogs.Estimate, au)
 			}
 			// Legacy JSON output keeps the basic usage shape. Stream JSON uses
 			// the enriched attributed event below, never both.
@@ -1154,6 +1184,24 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 			return writeExecProviderError(stdout, stderr, options.outputFormat, "provider_error", marshalErr.Error())
 		}
 		result.FinalAnswer = string(encoded)
+	} else if options.design != "" {
+		result, err = runExecDesign(runCtx, execDesignRun{
+			now:           deps.now(),
+			store:         preparedSession.Store,
+			sessionID:     preparedSession.Session.SessionID,
+			workspaceRoot: workspaceRoot,
+			images:        images,
+			provider:      provider,
+			stageResolver: stageModelResolver,
+			primaryName:   resolved.Provider.Name,
+			primaryModel:  resolved.Provider.Model,
+			primaryEffort: forwardEffort,
+			options:       runOptions,
+			memClient:     memClient,
+			recovery:      recovery,
+			writer:        &writer,
+			record:        sessionRecorder.append,
+		})
 	} else if options.planPath != "" {
 		result, err = splicerun.RunDesignPlan(runCtx, designPlan, provider, runOptions, memClient, recovery)
 	} else {
@@ -1257,10 +1305,14 @@ func runExec(args []string, stdout io.Writer, stderr io.Writer, deps appDeps) in
 		}
 		return writeExecError(stdout, stderr, options.outputFormat, code, err.Error(), exitCode)
 	}
-	sessionRecorder.append(sessions.EventMessage, map[string]any{
-		"role":    "assistant",
-		"content": result.FinalAnswer,
-	})
+	// A design run's final answer is a plan result, not a conversation turn. Storing
+	// it would put the result JSON into the design history.
+	if options.design == "" {
+		sessionRecorder.append(sessions.EventMessage, map[string]any{
+			"role":    "assistant",
+			"content": result.FinalAnswer,
+		})
+	}
 
 	if notice := result.TruncationNotice(); notice != "" {
 		writer.warning(notice)
@@ -2029,13 +2081,16 @@ func resolveExecRunMetadata(profile config.ProviderProfile) (execRunMetadata, er
 }
 
 // formatSpawnAudit renders one spawn audit record as a compact single line:
-// profile, binary, argv, working directory, and the engine decision.
+// profile, binary, argv, working directory, and the engine decision. A
+// command line can carry a token, so the line passes through secrets.Redact.
 func formatSpawnAudit(record procrun.AuditRecord) string {
 	detail := fmt.Sprintf("%s %s %s dir=%s", record.ProfileID, record.Name, strings.Join(record.Args, " "), record.Dir)
+	line := fmt.Sprintf("[spawn] %s backend=%s wrapped=%t", detail, record.Decision.Backend, record.Decision.Wrapped)
 	if record.Decision.Rejected {
-		return "[spawn-refused] " + detail + " reason=" + record.Decision.Reason
+		line = "[spawn-refused] " + detail + " reason=" + record.Decision.Reason
 	}
-	return fmt.Sprintf("[spawn] %s backend=%s wrapped=%t", detail, record.Decision.Backend, record.Decision.Wrapped)
+	redacted, _ := secrets.Redact(line)
+	return redacted
 }
 
 func writeExecStreamJSONFinal(stdout io.Writer, cwd string, metadata execRunMetadata, permissionMode agent.PermissionMode, text string, exitCode int) int {

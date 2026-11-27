@@ -8,6 +8,7 @@ package splice
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -285,5 +286,59 @@ func TestFailedRepairReentryStopsRepairsNotTheRun(t *testing.T) {
 	cancel()
 	if _, _, err, _ := run(ctx, context.Canceled); err == nil {
 		t.Fatal("a cancelled run must still end")
+	}
+}
+
+// writerChangingTests is a writer whose repair re-entry changes a test file.
+type writerChangingTests struct{}
+
+func (writerChangingTests) Capabilities() stages.Capabilities {
+	return stages.Capabilities{ModelFree: false, Description: "writing code changes"}
+}
+
+func (writerChangingTests) Run(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	return schemas.HarnessStageOutput{Summary: "revision applied", Confidence: 0.9, ChangedFiles: []string{"pkg/tests/test_x.py"}}, nil
+}
+
+// recordingTestRunner fails its first run and records the changed files each
+// run receives.
+type recordingTestRunner struct {
+	scriptedTestRunner
+	seen []map[string][]string
+}
+
+func (s *recordingTestRunner) Run(ctx context.Context, input schemas.HarnessStageInput, provider zeroruntime.Provider, options stages.StageOptions) (schemas.HarnessStageOutput, error) {
+	s.seen = append(s.seen, input.RunChangedFiles)
+	return s.scriptedTestRunner.Run(ctx, input, provider, options)
+}
+
+// The re-run after a repair must see the files the repair writer changed.
+func TestRepairTestRerunSeesRepairWriterFiles(t *testing.T) {
+	runner := &recordingTestRunner{scriptedTestRunner: scriptedTestRunner{failTimes: 1}}
+	registry := stageRegistry{
+		"code_writer": writerChangingTests{},
+		"test_runner": runner,
+	}
+	plan := schemas.ExecutionPlan{Stages: []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}}}
+	var outputs []schemas.HarnessStageOutput
+	var records []schemas.StageRecord
+	priorSummaries := map[string]string{}
+	priorChangedFiles := map[string][]string{}
+	initial := schemas.HarnessStageOutput{Summary: "Test command failed with exit code 1.", Data: testResultsPayload(true)}
+
+	repaired, _, err := attemptLocalRepair(
+		context.Background(), "run-repair-rerun", 1, plan, registry, nil,
+		PipelineRunConfig{}, t.TempDir(), nil, nil, nil, nil,
+		time.Now().Add(time.Minute), NewStageExecutionBudget(0), &records, &outputs,
+		&priorSummaries, &priorChangedFiles, initial,
+	)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if !repaired || len(runner.seen) != 2 {
+		t.Fatalf("repaired = %v, test runs = %d, want a repaired pass with 2 runs", repaired, len(runner.seen))
+	}
+	if !slices.Contains(runner.seen[1]["code_writer"], "pkg/tests/test_x.py") {
+		t.Fatalf("re-run changed files = %v, want the repair writer's test file", runner.seen[1])
 	}
 }

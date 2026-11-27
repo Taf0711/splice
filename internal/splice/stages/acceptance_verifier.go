@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Taf0711/splice/internal/splice/schemas"
 	"github.com/Taf0711/splice/internal/zeroruntime"
@@ -19,6 +20,56 @@ var _ Stage = AcceptanceVerifier{}
 
 const defaultAcceptanceTimeoutSeconds = 30
 
+// acceptanceUnwindGrace bounds how long the verifier waits for a cancelled
+// acceptance command to return. It is a var so tests can shorten it.
+var acceptanceUnwindGrace = 2 * time.Second
+
+// acceptanceDetailMaxLines bounds the failed-check lines in the Detail.
+const acceptanceDetailMaxLines = 5
+
+// acceptanceDetailMaxBytes bounds the statement and the message of each line.
+const acceptanceDetailMaxBytes = 200
+
+// acceptanceDetail returns the summary, then one line for each failed or
+// errored check. Passed and skipped checks are not listed.
+func acceptanceDetail(summary string, results []schemas.TestCaseResult) string {
+	var b strings.Builder
+	b.WriteString(summary)
+	shown, hidden := 0, 0
+	for _, result := range results {
+		if result.Status != "failed" && result.Status != "errored" {
+			continue
+		}
+		if shown == acceptanceDetailMaxLines {
+			hidden++
+			continue
+		}
+		shown++
+		message := result.Message
+		if i := strings.IndexByte(message, '\n'); i >= 0 {
+			message = message[:i]
+		}
+		fmt.Fprintf(&b, "\n- %s: %s: %s", result.Status,
+			cutAtRune(result.Name, acceptanceDetailMaxBytes), cutAtRune(message, acceptanceDetailMaxBytes))
+	}
+	if hidden > 0 {
+		fmt.Fprintf(&b, "\n- %d more not shown", hidden)
+	}
+	return b.String()
+}
+
+// cutAtRune shortens s to at most max bytes without splitting a rune.
+func cutAtRune(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 func (AcceptanceVerifier) Capabilities() Capabilities {
 	return Capabilities{ModelFree: true, TimeoutSeconds: defaultAcceptanceTimeoutSeconds, Description: "verifying acceptance criteria"}
 }
@@ -30,6 +81,9 @@ func (AcceptanceVerifier) Run(ctx context.Context, input schemas.HarnessStageInp
 	}
 
 	results := make([]schemas.TestCaseResult, 0, len(input.AcceptanceFacts))
+	// commandStuck is set when a command ignored its cancelled context. Its
+	// goroutine still holds the tool runner, so no later command may start.
+	commandStuck := false
 	for _, fact := range input.AcceptanceFacts {
 		command := ""
 		if fact.VerificationCommand != nil {
@@ -40,6 +94,14 @@ func (AcceptanceVerifier) Run(ctx context.Context, input schemas.HarnessStageInp
 				Name:    fact.Statement,
 				Status:  "skipped",
 				Message: "no automated verification command",
+			})
+			continue
+		}
+		if commandStuck {
+			results = append(results, schemas.TestCaseResult{
+				Name:    fact.Statement,
+				Status:  "errored",
+				Message: "not run: an earlier acceptance command is still running",
 			})
 			continue
 		}
@@ -80,9 +142,11 @@ func (AcceptanceVerifier) Run(ctx context.Context, input schemas.HarnessStageInp
 		var toolResult ToolResult
 		var err error
 		timedOut := false
+		returned := false
 		select {
 		case outcome := <-outcomes:
 			toolResult, err = outcome.result, outcome.err
+			returned = true
 		case <-factCtx.Done():
 			timedOut = factCtx.Err() == context.DeadlineExceeded
 			err = factCtx.Err()
@@ -91,13 +155,19 @@ func (AcceptanceVerifier) Run(ctx context.Context, input schemas.HarnessStageInp
 			timedOut = true
 		}
 		cancel()
-		// The deadline branch above leaves the tool call still running. Now that
-		// its context is cancelled, wait for it to unwind before starting the
-		// next fact, so one criterion's command never overlaps another's:
-		// RunTool passes through the permission gate and the command ledger, and
-		// neither expects to be entered twice at once.
-		if timedOut {
-			<-outcomes
+		// The command may still be running. Its context is cancelled, so wait
+		// for it to unwind before starting the next fact, so one criterion's
+		// command never overlaps another's: RunTool passes through the
+		// permission gate and the command ledger, and neither expects to be
+		// entered twice at once. The wait is bounded by acceptanceUnwindGrace.
+		if !returned {
+			grace := time.NewTimer(acceptanceUnwindGrace)
+			select {
+			case <-outcomes:
+				returned = true
+			case <-grace.C:
+			}
+			grace.Stop()
 		}
 		durationMs := int(time.Since(start).Milliseconds())
 
@@ -105,6 +175,10 @@ func (AcceptanceVerifier) Run(ctx context.Context, input schemas.HarnessStageInp
 		switch {
 		case ctx.Err() != nil:
 			return schemas.HarnessStageOutput{}, ctx.Err()
+		case timedOut && !returned:
+			result.Status = "errored"
+			result.Message = fmt.Sprintf("acceptance command timed out after %ds and did not stop within %s", timeout, acceptanceUnwindGrace)
+			commandStuck = true
 		case timedOut:
 			result.Status = "errored"
 			result.Message = fmt.Sprintf("acceptance command timed out after %ds", timeout)
@@ -142,7 +216,7 @@ func (AcceptanceVerifier) Run(ctx context.Context, input schemas.HarnessStageInp
 		confidence = 0.5
 	}
 	summary := fmt.Sprintf("Acceptance verification: %d passed, %d failed, %d errored, %d skipped.", passed, failed, errored, skipped)
-	detail := summary
+	detail := acceptanceDetail(summary, results)
 	return schemas.HarnessStageOutput{
 		Summary:    summary,
 		Detail:     detail,
