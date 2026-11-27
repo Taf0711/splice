@@ -100,6 +100,9 @@ Use `--auto low` for conservative automation. Review the policy before you use
 | `splice models` | List known models and capabilities. |
 | `splice auth` | Manage supported OAuth logins. |
 | `splice doctor` | Check configuration and provider health. |
+| `splice gc` | Remove stale temporary Go build caches and run directories. Add `--dry-run` to only report them. |
+
+Splice also removes these by itself, at most once an hour. A Go build cache that is not used for 7 days is removed, and the total stays under 10 GiB. Set `SPLICE_GOCACHE_MAX_GB` to change the limit, or `SPLICE_GC=off` to stop the automatic removal.
 
 The `pipeline.toolchain` check looks for `git`, `go`, `gosec`, `trivy`, `python`, `node`, and `npx` on PATH.
 A missing tool gives a warning, not a failure.
