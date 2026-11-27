@@ -5552,6 +5552,92 @@ func TestRunStopsWhenAcceptanceFailsUnchanged(t *testing.T) {
 	}
 }
 
+// With an escalation model, the repeat limit switches the run to that model
+// once and does not stop it. The count restarts for the escalated model, so
+// the run passes the old limit again before the iteration limit ends it.
+func TestRunEscalatesOnceBeforeAcceptanceRepeatStops(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(call int) string { return fmt.Sprintf("attempt %d", call) })
+	// The writer reports its file contents. The cycle rule hashes them, so
+	// each pass has its own state and the cycle rule does not escalate first.
+	writer.run = func(call int) (schemas.HarnessStageOutput, error) {
+		content := fmt.Sprintf("attempt %d", call)
+		if err := os.WriteFile(filepath.Join(workDir, "result.txt"), []byte(content), 0600); err != nil {
+			return schemas.HarnessStageOutput{}, err
+		}
+		return schemas.HarnessStageOutput{Summary: "wrote result", Data: map[string]any{"code_writer_output": schemas.CodeWriterOutput{
+			Files: []schemas.FileChange{{Path: "result.txt", ChangeType: "modify", Content: content}},
+		}}}, nil
+	}
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance repeats while the workspace changes",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	var progress strings.Builder
+	// The rules may ask the escalated model for a step-back analysis. The
+	// varying provider answers that call.
+	cfg := PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50,
+		EscalationModelResolver: func() (agent.ModelSelection, error) {
+			return agent.ModelSelection{Provider: &varyingFailureProvider{}, ProviderName: "escalation-provider", Model: "escalated-model"}, nil
+		}})
+	cfg.OnReasoning = func(s string) { progress.WriteString(s) }
+	result, err := runIterationLoop(context.Background(), "run-acceptance-escalate", plan, registry,
+		runFakeProvider{}, cfg, workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	reason := DerefString(result.AbortReason)
+	if writer.calls <= acceptanceRepeatLimit {
+		t.Fatalf("writer calls = %d; the run stopped at the repeat limit instead of escalating; reason = %q", writer.calls, reason)
+	}
+	if strings.Contains(reason, "acceptance_no_progress") {
+		t.Fatalf("acceptance guard ended the run after escalation: %q", reason)
+	}
+	if !strings.Contains(progress.String(), "[escalation] switched to model escalated-model for iteration 4") {
+		t.Fatalf("no escalation switch at the repeat limit:\n%s", progress.String())
+	}
+	if n := strings.Count(progress.String(), "[escalation] switched"); n != 1 {
+		t.Fatalf("escalation switches = %d, want 1", n)
+	}
+}
+
+// With an escalation model, the acceptance stall switches the run to that
+// model once. The count restarts, so the run stops at the next stall.
+func TestRunEscalatesOnceBeforeAcceptanceStallStops(t *testing.T) {
+	registry, writer, workDir := acceptanceFixture(t, func(int) string { return "same content" })
+	plan := schemas.ExecutionPlan{
+		Tier:          schemas.TierLight,
+		TokenBudget:   schemas.TokenBudget{TotalOutputBudget: 1000000},
+		RequestIntent: "acceptance fails on an unchanged workspace",
+		Stages:        []schemas.ExecutionStage{{Name: "code_writer"}, {Name: "test_runner"}, {Name: "acceptance_verifier"}},
+	}
+	var progress strings.Builder
+	cfg := PipelineConfigFromAgentOptions(agent.Options{MaxTurns: 50,
+		EscalationModelResolver: func() (agent.ModelSelection, error) {
+			return agent.ModelSelection{Provider: &varyingFailureProvider{}, ProviderName: "escalation-provider", Model: "escalated-model"}, nil
+		}})
+	cfg.OnReasoning = func(s string) { progress.WriteString(s) }
+	result, err := runIterationLoop(context.Background(), "run-acceptance-stall-escalate", plan, registry,
+		runFakeProvider{}, cfg, workDir, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	reason := DerefString(result.AbortReason)
+	if result.Status != "aborted" || writer.calls != 4 {
+		t.Fatalf("status = %q, writer calls = %d; want aborted after pass 4; reason = %q", result.Status, writer.calls, reason)
+	}
+	if !strings.Contains(reason, "acceptance_no_progress") || !strings.Contains(reason, "iterations 3 and 4") {
+		t.Fatalf("reason = %q; want the stall reason for iterations 3 and 4", reason)
+	}
+	if !strings.Contains(progress.String(), "[escalation] switched to model escalated-model for iteration 3") {
+		t.Fatalf("no escalation switch at the first stall:\n%s", progress.String())
+	}
+	if n := strings.Count(progress.String(), "[escalation] switched"); n != 1 {
+		t.Fatalf("escalation switches = %d, want 1", n)
+	}
+}
+
 func TestRunContinuesWhenAcceptanceFailsButFilesChange(t *testing.T) {
 	registry, writer, workDir := acceptanceFixture(t, func(call int) string { return fmt.Sprintf("attempt %d", call) })
 	plan := schemas.ExecutionPlan{

@@ -536,6 +536,49 @@ func TestRunStopsAfterRepairNoProgress(t *testing.T) {
 	}
 }
 
+// With an escalation model, the first repair stall switches the run to that
+// model instead of stopping it. The escalated pass stalls too, so the run stops
+// at the second stall.
+func TestRunEscalatesOnceBeforeRepairStallStops(t *testing.T) {
+	writerCalls := 0
+	registry := stageRegistry{
+		"code_writer": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			writerCalls++
+			return repairCodeWriterOutput(), nil
+		}),
+		"test_runner": stageFunc(func(context.Context, schemas.HarnessStageInput, zeroruntime.Provider, stages.StageOptions) (schemas.HarnessStageOutput, error) {
+			return repairTestResults("failed"), nil
+		}),
+	}
+	var progress strings.Builder
+	options := PipelineConfigFromAgentOptions(agent.Options{Cwd: t.TempDir(), MaxTurns: 4,
+		EscalationModelResolver: func() (agent.ModelSelection, error) {
+			return agent.ModelSelection{Provider: runFakeProvider{}, ProviderName: "escalation-provider", Model: "escalated-model"}, nil
+		}})
+	options.OnReasoning = func(s string) { progress.WriteString(s) }
+
+	result, err := runIterationLoop(context.Background(), "repair-stall-escalate", repairTestPlan(), registry,
+		runFakeProvider{}, options, t.TempDir(), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("runIterationLoop: %v", err)
+	}
+	if result.Status != "aborted" || result.AbortReason == nil {
+		t.Fatalf("status = %q, abort reason = %v, want aborted", result.Status, result.AbortReason)
+	}
+	if !strings.Contains(*result.AbortReason, repairNoProgressReason) || !strings.Contains(*result.AbortReason, "iteration 2") {
+		t.Fatalf("abort reason = %q, want the repair_no_progress reason for iteration 2", *result.AbortReason)
+	}
+	if !strings.Contains(progress.String(), "[escalation] switched to model escalated-model for iteration 2") {
+		t.Fatalf("no escalation switch after the first repair stall:\n%s", progress.String())
+	}
+	if n := strings.Count(progress.String(), "[escalation] switched"); n != 1 {
+		t.Fatalf("escalation switches = %d, want 1", n)
+	}
+	if writerCalls != 4 {
+		t.Fatalf("code_writer calls = %d, want 4 (two passes with two writes each)", writerCalls)
+	}
+}
+
 // A repair that resolves the failure must complete the run as before, and no
 // record may carry the stall flag.
 func TestRunContinuesWhenRepairFixesTests(t *testing.T) {

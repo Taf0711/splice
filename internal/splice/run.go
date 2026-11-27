@@ -1242,6 +1242,51 @@ func runIterationLoop(
 	// for this run. Escalation fires at most once (AR10c).
 	escalated := false
 
+	// tryEscalate switches the run to the escalation model. It sets escalated,
+	// so escalation fires at most once per run. It returns true only when a
+	// model switch was applied. Without a resolver it returns false, and the
+	// caller decides what to report.
+	tryEscalate := func(iteration int) (switched bool) {
+		escalated = true // do not retry: escalation fires at most once per run
+		if options.EscalationModelResolver == nil {
+			return false
+		}
+		escalation, escErr := options.EscalationModelResolver()
+		if escErr != nil {
+			emitNotice(options, fmt.Sprintf("[escalation] resolver error: %v (continuing without escalation)", escErr))
+			return false
+		}
+		if escalation.Provider == nil {
+			emitProgress(options, "[escalation] no escalation provider configured (continuing without escalation)\n")
+			return false
+		}
+		provider = escalation.Provider
+		options.ProviderName = escalation.ProviderName
+		options.Model = escalation.Model
+		// An escalation config without its own effort keeps the
+		// run's; either way it is fitted to the escalated model.
+		if escalation.ReasoningEffort != "" {
+			options.ReasoningEffort = escalation.ReasoningEffort
+		}
+		options.ReasoningEffort = string(options.ModelRegistry.RequestEffort(options.Model, modelregistry.ReasoningEffort(options.ReasoningEffort)))
+		// Escalation applies to every later LLM-backed stage. Do not let
+		// the original stage router replace it on the next iteration.
+		options.StageModelResolver = nil
+		options.escalatedModel = escalation.Model
+		// Escalation also overrides node model pins. The node
+		// resolver is superseded so every later call takes the
+		// escalated model, and the switch names the pins it replaced.
+		msg := fmt.Sprintf("[escalation] switched to model %s for iteration %d", escalation.Model, iteration+1)
+		if pinned := pinnedNodeNames(plan); len(pinned) > 0 {
+			options.NodeModelResolver = func(string, agent.ModelOverride) (agent.ModelSelection, error) {
+				return escalation, nil
+			}
+			msg += fmt.Sprintf("; overrides the model pin of node(s) %s", strings.Join(pinned, ", "))
+		}
+		emitProgress(options, msg+"\n")
+		return true
+	}
+
 	// MaxTurns applies to agent.Run, not deterministic pipeline passes.
 	maxIterations := defaultMaxIterations
 	if options.Advisor == nil || options.Advisor.Mode() == AdvisorModeOff {
@@ -1291,6 +1336,24 @@ func runIterationLoop(
 	// non-empty acceptance signature. accFirstIter is the first iteration
 	// of that run.
 	var accRepeat, accFirstIter int
+	// recordEscalatedPass records the acceptance signature and the billed cost
+	// of pass i, as the normal continue path does, so the escalated pass starts
+	// from the same state. accRepeat restarts at 0 for the escalated model. It
+	// returns the failure reason when the run must end, or "" otherwise.
+	recordEscalatedPass := func(i int, outputs []schemas.HarnessStageOutput) string {
+		accKeys, err := acceptanceFailureSignatures(outputs)
+		if err != nil {
+			return fmt.Sprintf("acceptance signature: %v", err)
+		}
+		prevAcceptanceSig, prevAcceptanceIter = strings.Join(accKeys, "\n"), i
+		accRepeat, accFirstIter = 0, i
+		snap, err := ledgerCostSnapshot(ledger)
+		if err != nil {
+			return err.Error()
+		}
+		prevCost = snap
+		return ""
+	}
 	for i := 1; i <= maxIterations; i++ {
 		if ctx.Err() != nil {
 			return schemas.PipelineResult{}, context.Canceled
@@ -1354,7 +1417,14 @@ func runIterationLoop(
 			// Rule-mode backstop: an active classifier owns this decision.
 			// A stalled repair ends the run. Another pass repeats the failure.
 			if options.ClassifierPolicy == nil && passRepairStalled(passRecords) {
-				return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf(repairStallReason, i))
+				stopReason := fmt.Sprintf(repairStallReason, i)
+				if !escalated && tryEscalate(i) {
+					rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, "Recovery: escalation after repair stall: "+stopReason)
+					revisionContext = &rc
+					priorFailure = ""
+					continue
+				}
+				return finishWithReason(runID, plan, allRecords, "aborted", stopReason)
 			}
 			failed := findFailed(passRecords)
 			if options.ClassifierPolicy != nil {
@@ -1484,7 +1554,16 @@ func runIterationLoop(
 		// Rule-mode backstop: an active classifier owns this decision.
 		// The pass did not succeed. A stalled repair ends the run here too.
 		if options.ClassifierPolicy == nil && passRepairStalled(passRecords) {
-			return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf(repairStallReason, i))
+			stopReason := fmt.Sprintf(repairStallReason, i)
+			if !escalated && tryEscalate(i) {
+				if reason := recordEscalatedPass(i, passOutputs); reason != "" {
+					return finishWithReason(runID, plan, allRecords, "failed", reason)
+				}
+				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, "Recovery: escalation after repair stall: "+stopReason)
+				revisionContext = &rc
+				continue
+			}
+			return finishWithReason(runID, plan, allRecords, "aborted", stopReason)
 		}
 		// Rule-mode backstop: an active classifier owns this decision.
 		// The same acceptance checks failed again. The run stops at once when
@@ -1505,10 +1584,28 @@ func runIterationLoop(
 		}
 		if options.ClassifierPolicy == nil && accRepeat >= 2 &&
 			state.PassChanged != nil && !*state.PassChanged {
-			return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf(acceptanceStallReason, prevAcceptanceIter, i, acceptanceFirstStatement(accKeys[0])))
+			stopReason := fmt.Sprintf(acceptanceStallReason, prevAcceptanceIter, i, acceptanceFirstStatement(accKeys[0]))
+			if !escalated && tryEscalate(i) {
+				if reason := recordEscalatedPass(i, passOutputs); reason != "" {
+					return finishWithReason(runID, plan, allRecords, "failed", reason)
+				}
+				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, "Recovery: escalation after acceptance stall: "+stopReason)
+				revisionContext = &rc
+				continue
+			}
+			return finishWithReason(runID, plan, allRecords, "aborted", stopReason)
 		}
 		if options.ClassifierPolicy == nil && accRepeat >= acceptanceRepeatLimit {
-			return finishWithReason(runID, plan, allRecords, "aborted", fmt.Sprintf(acceptanceRepeatReason, accFirstIter, i, acceptanceFirstStatement(accKeys[0])))
+			stopReason := fmt.Sprintf(acceptanceRepeatReason, accFirstIter, i, acceptanceFirstStatement(accKeys[0]))
+			if !escalated && tryEscalate(i) {
+				if reason := recordEscalatedPass(i, passOutputs); reason != "" {
+					return finishWithReason(runID, plan, allRecords, "failed", reason)
+				}
+				rc := buildRevisionContext(plan.RequestIntent, history, passRecords, passOutputs, "Recovery: escalation after acceptance repeat: "+stopReason)
+				revisionContext = &rc
+				continue
+			}
+			return finishWithReason(runID, plan, allRecords, "aborted", stopReason)
 		}
 		prevAcceptanceSig, prevAcceptanceIter = accSig, i
 
@@ -1669,41 +1766,7 @@ func runIterationLoop(
 		}
 		if decision.Action == schemas.ActionEscalateCycleDetected || decision.Action == schemas.ActionEscalateOscillation {
 			if !escalated {
-				if options.EscalationModelResolver != nil {
-					escalated = true // do not retry: escalation fires at most once per run
-					escalation, escErr := options.EscalationModelResolver()
-					if escErr != nil {
-						emitNotice(options, fmt.Sprintf("[escalation] resolver error: %v (continuing without escalation)", escErr))
-					} else if escalation.Provider == nil {
-						emitProgress(options, "[escalation] no escalation provider configured (continuing without escalation)\n")
-					} else {
-						provider = escalation.Provider
-						options.ProviderName = escalation.ProviderName
-						options.Model = escalation.Model
-						// An escalation config without its own effort keeps the
-						// run's; either way it is fitted to the escalated model.
-						if escalation.ReasoningEffort != "" {
-							options.ReasoningEffort = escalation.ReasoningEffort
-						}
-						options.ReasoningEffort = string(options.ModelRegistry.RequestEffort(options.Model, modelregistry.ReasoningEffort(options.ReasoningEffort)))
-						// Escalation applies to every later LLM-backed stage. Do not let
-						// the original stage router replace it on the next iteration.
-						options.StageModelResolver = nil
-						options.escalatedModel = escalation.Model
-						// Escalation also overrides node model pins. The node
-						// resolver is superseded so every later call takes the
-						// escalated model, and the switch names the pins it replaced.
-						msg := fmt.Sprintf("[escalation] switched to model %s for iteration %d", escalation.Model, i+1)
-						if pinned := pinnedNodeNames(plan); len(pinned) > 0 {
-							options.NodeModelResolver = func(string, agent.ModelOverride) (agent.ModelSelection, error) {
-								return escalation, nil
-							}
-							msg += fmt.Sprintf("; overrides the model pin of node(s) %s", strings.Join(pinned, ", "))
-						}
-						emitProgress(options, msg+"\n")
-					}
-				} else {
-					escalated = true
+				if !tryEscalate(i) && options.EscalationModelResolver == nil {
 					emitProgress(options, "[escalation] no EscalationModelResolver configured (continuing without escalation)\n")
 				}
 			}
