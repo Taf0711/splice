@@ -7,36 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0](https://github.com/Taf0711/splice/compare/v0.3.2...v0.4.0) (2026-11-27)
 
+### Action required
 
-### Features
+* **sandbox:** pipeline stages that run repository code (tests, acceptance commands, scanners, command nodes) now refuse to run when no native sandbox backend is available. Run `splice sandbox setup` and `splice doctor` to check the backend.
+* **sandbox:** a run started inside another Splice sandbox now refuses by default. Set `sandbox.acceptNestedSandbox` in the user config, or pass `--accept-nested-sandbox` to `splice exec`, to accept it. The receipt then shows that the stage sandbox was not enforced.
+* **plugins:** plugin tool commands and plugin hooks now run inside the sandbox in all modes. To run a user-installed plugin on the host, set `plugins.<id>.hostExecution` in the user config.
+* **hooks:** user hooks now run inside the stage sandbox in a pipeline run. To run a hook on the host, set `runOnHost` on that hook in the user `hooks.json`.
+* **verification:** exit code 0 alone is no longer test evidence. `go test`, pytest, and jest give per-test evidence. Other test commands record "test command passed", and the run is not reported as verified.
 
-* **cli:** splice exec --design designs a plan, then runs it ([f2aac05](https://github.com/Taf0711/splice/commit/f2aac0502f6b45289fc1330bc639285f7e65cd1c))
-* **splice:** a test that failed before the run no longer blocks it ([ceaa05f](https://github.com/Taf0711/splice/commit/ceaa05f5b22833792a2982eb47706adee76ee337))
-* **splice:** collect stale temp Go caches and run directories; add splice gc ([4bdc06a](https://github.com/Taf0711/splice/commit/4bdc06a627e2ba8a8357d24b68e9ec55217f3160))
-* **splice:** report when the plan critic repairs model output ([bb0bc56](https://github.com/Taf0711/splice/commit/bb0bc562057334949a36f50d867d5af701b215a7))
-* **web:** show pipelines left to right, with the live run in the editor ([a374910](https://github.com/Taf0711/splice/commit/a3749103ccbbcebffa8b576301f92177f047d70b))
+### Added
 
+* **cli:** `splice exec --design "<request>"` designs a plan, has it critiqued, revises it once when the critique blocks it, then runs it. A bad model route stops the command before the first provider request.
+* **cli:** `splice gc` removes stale temporary Go build caches and run directories now; `splice gc --dry-run` reports what it would remove. Splice also collects them by itself, at most once an hour: a cache unused for 7 days is removed, and the total is kept under 10 GiB, least recently used first. A cache used in the last hour is never removed. Set `SPLICE_GOCACHE_MAX_GB` to change the cap, or `SPLICE_GC=off` to turn the automatic collection off.
+* **verification:** a test that already failed before the run no longer blocks it. For `go test`, pytest, and jest, Splice runs the same command on the state before the run, and a failure that also happens there does not trigger repair. The receipt names those tests.
+* **web:** the pipeline viewer and editor show pipelines left to right, with edges that name what they carry. The editor shows the live run on its canvas. A topology with more than 256 nodes or 2048 edges does not load.
+* **design:** when the plan critic repairs a malformed critique from the model, the stage summary says what it repaired.
 
-### Bug Fixes
+### Security
 
-* enforce the stage sandbox and report truthful verification ([305774c](https://github.com/Taf0711/splice/commit/305774c426b9bb0c73a4e88fe2f8588922302acd))
-* **evals:** wait out a provider usage limit instead of recording failures ([bbc32e9](https://github.com/Taf0711/splice/commit/bbc32e937324bafef92d36699c1c19a16dd8e82d))
-* reliable rollback and rewind, Linux Go cache, stage-stamped tool events ([0535d8f](https://github.com/Taf0711/splice/commit/0535d8f47b1ef27259850299dfda3c6dd34aa532))
-* **splice:** {tests} runs the related tests, never the whole suite by accident ([e47351c](https://github.com/Taf0711/splice/commit/e47351ca2e4e809b69eb8d9271f7ae5f1bcbd680))
-* **splice:** accept a plain sentence for the critic's cross-cutting concerns ([01076f8](https://github.com/Taf0711/splice/commit/01076f815a751af04eda809c4ba053720b8c5e23))
-* **splice:** keep Bandit output within the tool budget; derive the critic's blocking flag ([35b6076](https://github.com/Taf0711/splice/commit/35b60766586c8ca19aaca0876b89ad69e2876fe1))
-* **splice:** model-free stages skip the input budget; tolerate string-encoded critiques; clamp oversized context requests ([941d000](https://github.com/Taf0711/splice/commit/941d000f7255042c19d53f7f66e333d875524dc7))
-* **splice:** repair a critique whose last string value has no quotes ([e25b0c9](https://github.com/Taf0711/splice/commit/e25b0c97ff45f4328ef2caf6f473847da1e16570))
-* **splice:** run Bandit quietly so its JSON parses ([2abb89a](https://github.com/Taf0711/splice/commit/2abb89a006b854b49e85e5436c2432f0af8443b0))
-* **splice:** show the text around the failing byte in critic parse errors ([6a1de27](https://github.com/Taf0711/splice/commit/6a1de27c6dc86002f3190a55052ea687667c6d72))
-* **splice:** stop a rule-mode run when the repair loop makes no progress instead of starting a new pass ([508cf6a](https://github.com/Taf0711/splice/commit/508cf6a117e18588e9aaab30dc5ab6d96359db52))
-* **splice:** stop a rule-mode run when the same acceptance checks fail on an unchanged workspace; log failed checks ([bb7db02](https://github.com/Taf0711/splice/commit/bb7db02cf77174a0d79d784f04f637ed16384ffe))
-* **splice:** stop when the same acceptance checks fail three times; show failed checks in the run log ([11af4e5](https://github.com/Taf0711/splice/commit/11af4e56b71f5ec282fe9994cebe49dc8ae35039))
-* **splice:** the pipeline reads the whole task, edits large files safely, and runs the changed tests ([77f959d](https://github.com/Taf0711/splice/commit/77f959d17a3efa4f417eab980b7e28639b999f63))
-* **splice:** the run output budget counts visible output, not reasoning tokens ([3d88279](https://github.com/Taf0711/splice/commit/3d8827924fd931db916d90c8fff85d4805271fc0))
-* **splice:** try the escalation model once before a stall guard stops the run ([fec2d59](https://github.com/Taf0711/splice/commit/fec2d5919a22ca5b60141c1e9e629bfc8ec14670))
-* **tempgc:** collect again each hour in long-lived processes ([0c212d5](https://github.com/Taf0711/splice/commit/0c212d5208e2fc783df58ea7f73ee4b090f4517b))
-* **usage:** price OpenRouter routing suffixes and prefer the reported charge ([fe08f08](https://github.com/Taf0711/splice/commit/fe08f080e2ee538f10af57eb793b782d8d407a16))
+* **sandbox:** stages that run repository code use a stage policy derived from the user policy: your `denyRead` and `denyWrite` entries stay, network is off, and grants, added directories, and credential files do not apply.
+* **redaction:** command text in stage summaries and audit lines goes through secret redaction.
+
+### Fixed
+
+* **data loss:** a change to a file larger than about 64 KiB could write back a truncated copy. Every write now checks that the bytes the change was based on are the bytes on disk, and a file seen only in part is never overwritten as a whole. This also affected earlier releases.
+* **pipeline:** the code writer now reads the whole request (up to 32 KiB), not the first 320 characters. Ranged reads deliver the requested lines.
+* **pipeline:** a run whose repair loop makes no progress, or whose same acceptance checks keep failing, now stops with a clear reason instead of repeating passes until the wall-time limit. With an `escalation` model in `stage-models.json`, the run first switches to it for one more pass, and stops only if that pass stalls too. With the trajectory classifier active, the classifier still makes this decision.
+* **pipeline:** the run output budget counts visible output only. Reasoning tokens no longer end a run early on reasoning models.
+* **pipeline:** a configured `{tests}` placeholder now expands to the changed test files and the test files related to the changed source files. When nothing matches, the tests do not run and the run is not reported as verified, instead of running the whole suite.
+* **pipeline:** stages that make no model call no longer fail on an input token limit. An oversized context request is reduced to fit instead of failing the stage.
+* **security audit:** a large Bandit report no longer breaks the security stage.
+* **design:** the plan critic accepts the common ways a model sends a malformed critique, and a parse error shows the text near the failing byte.
+* **usage:** OpenRouter `:floor` and `:nitro` model IDs are priced, and OpenRouter's reported charge is used for models the registry does not list.
+* **recovery:** a rollback in a worktree run keeps the recovery commit off your branch, and a rewind that cannot write a file can be retried.
+* **events:** tool events carry the running pipeline stage and its pass number. `splice doctor` reports the pipeline toolchain.
 
 ## [0.3.2](https://github.com/Taf0711/splice/compare/v0.3.1...v0.3.2) (2026-11-03)
 
