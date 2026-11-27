@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/Taf0711/splice/compare/v0.3.2...v0.4.0) (2026-11-27)
+
+### Action required
+
+* **sandbox:** pipeline stages that run repository code (tests, acceptance commands, scanners, command nodes) now refuse to run when no native sandbox backend is available. Run `splice sandbox setup` and `splice doctor` to check the backend.
+* **sandbox:** a run started inside another Splice sandbox now refuses by default. Set `sandbox.acceptNestedSandbox` in the user config, or pass `--accept-nested-sandbox` to `splice exec`, to accept it. The receipt then shows that the stage sandbox was not enforced.
+* **plugins:** plugin tool commands and plugin hooks now run inside the sandbox in all modes. To run a user-installed plugin on the host, set `plugins.<id>.hostExecution` in the user config.
+* **hooks:** user hooks now run inside the stage sandbox in a pipeline run. To run a hook on the host, set `runOnHost` on that hook in the user `hooks.json`.
+* **verification:** exit code 0 alone is no longer test evidence. `go test`, pytest, and jest give per-test evidence. Other test commands record "test command passed", and the run is not reported as verified.
+
+### Added
+
+* **cli:** `splice exec --design "<request>"` designs a plan, has it critiqued, revises it once when the critique blocks it, then runs it. A bad model route stops the command before the first provider request.
+* **cli:** `splice gc` removes stale temporary Go build caches and run directories now; `splice gc --dry-run` reports what it would remove. Splice also collects them by itself, at most once an hour: a cache unused for 7 days is removed, and the total is kept under 10 GiB, least recently used first. A cache used in the last hour is never removed. Set `SPLICE_GOCACHE_MAX_GB` to change the cap, or `SPLICE_GC=off` to turn the automatic collection off.
+* **verification:** a test that already failed before the run no longer blocks it. For `go test`, pytest, and jest, Splice runs the same command on the state before the run, and a failure that also happens there does not trigger repair. The receipt names those tests.
+* **web:** the pipeline viewer and editor show pipelines left to right, with edges that name what they carry. The editor shows the live run on its canvas. A topology with more than 256 nodes or 2048 edges does not load.
+* **design:** when the plan critic repairs a malformed critique from the model, the stage summary says what it repaired.
+
+### Security
+
+* **sandbox:** stages that run repository code use a stage policy derived from the user policy: your `denyRead` and `denyWrite` entries stay, network is off, and grants, added directories, and credential files do not apply.
+* **redaction:** command text in stage summaries and audit lines goes through secret redaction.
+
+### Fixed
+
+* **data loss:** a change to a file larger than about 64 KiB could write back a truncated copy. Every write now checks that the bytes the change was based on are the bytes on disk, and a file seen only in part is never overwritten as a whole. This also affected earlier releases.
+* **pipeline:** the code writer now reads the whole request (up to 32 KiB), not the first 320 characters. Ranged reads deliver the requested lines.
+* **pipeline:** a run whose repair loop makes no progress, or whose same acceptance checks keep failing, now stops with a clear reason instead of repeating passes until the wall-time limit. With an `escalation` model in `stage-models.json`, the run first switches to it for one more pass, and stops only if that pass stalls too. With the trajectory classifier active, the classifier still makes this decision.
+* **pipeline:** the run output budget counts visible output only. Reasoning tokens no longer end a run early on reasoning models.
+* **pipeline:** a configured `{tests}` placeholder now expands to the changed test files and the test files related to the changed source files. When nothing matches, the tests do not run and the run is not reported as verified, instead of running the whole suite.
+* **pipeline:** stages that make no model call no longer fail on an input token limit. An oversized context request is reduced to fit instead of failing the stage.
+* **security audit:** a large Bandit report no longer breaks the security stage.
+* **design:** the plan critic accepts the common ways a model sends a malformed critique, and a parse error shows the text near the failing byte.
+* **usage:** OpenRouter `:floor` and `:nitro` model IDs are priced, and OpenRouter's reported charge is used for models the registry does not list.
+* **recovery:** a rollback in a worktree run keeps the recovery commit off your branch, and a rewind that cannot write a file can be retried.
+* **events:** tool events carry the running pipeline stage and its pass number. `splice doctor` reports the pipeline toolchain.
+
 ## [0.3.2](https://github.com/Taf0711/splice/compare/v0.3.1...v0.3.2) (2026-11-03)
 
 
